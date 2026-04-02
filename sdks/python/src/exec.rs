@@ -130,8 +130,7 @@ impl PyExecution {
     }
 
     fn stdin(&self) -> PyResult<PyExecStdin> {
-        let execution = unsafe { &mut *(Arc::as_ptr(&self.execution) as *mut Execution) };
-        match execution.stdin() {
+        match self.execution.stdin() {
             Some(stream) => Ok(PyExecStdin {
                 stream: Arc::new(Mutex::new(stream)),
             }),
@@ -142,8 +141,7 @@ impl PyExecution {
     }
 
     fn stdout(&self) -> PyResult<PyExecStdout> {
-        let execution = unsafe { &mut *(Arc::as_ptr(&self.execution) as *mut Execution) };
-        match execution.stdout() {
+        match self.execution.stdout() {
             Some(stream) => Ok(PyExecStdout {
                 stream: Arc::new(Mutex::new(stream)),
             }),
@@ -154,8 +152,7 @@ impl PyExecution {
     }
 
     fn stderr(&self) -> PyResult<PyExecStderr> {
-        let execution = unsafe { &mut *(Arc::as_ptr(&self.execution) as *mut Execution) };
-        match execution.stderr() {
+        match self.execution.stderr() {
             Some(stream) => Ok(PyExecStderr {
                 stream: Arc::new(Mutex::new(stream)),
             }),
@@ -169,8 +166,7 @@ impl PyExecution {
         let execution = Arc::clone(&self.execution);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let execution_mut = unsafe { &mut *(Arc::as_ptr(&execution) as *mut Execution) };
-            let exec_result = execution_mut.wait().await.map_err(map_err)?;
+            let exec_result = execution.wait().await.map_err(map_err)?;
             Ok(PyExecResult {
                 exit_code: exec_result.exit_code,
                 error_message: exec_result.error_message,
@@ -182,8 +178,7 @@ impl PyExecution {
         let execution = Arc::clone(&self.execution);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let execution_mut = unsafe { &mut *(Arc::as_ptr(&execution) as *mut Execution) };
-            execution_mut.kill().await.map_err(map_err)?;
+            execution.kill().await.map_err(map_err)?;
             Ok(())
         })
     }

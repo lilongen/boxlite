@@ -187,7 +187,7 @@ impl Execution {
     }
 
     /// Take the stdin stream (can only be called once).
-    pub fn stdin(&mut self) -> Option<ExecStdin> {
+    pub fn stdin(&self) -> Option<ExecStdin> {
         futures::executor::block_on(async {
             let mut inner = self.inner.lock().await;
             inner.stdin.take()
@@ -195,7 +195,7 @@ impl Execution {
     }
 
     /// Take the stdout stream (can only be called once).
-    pub fn stdout(&mut self) -> Option<ExecStdout> {
+    pub fn stdout(&self) -> Option<ExecStdout> {
         futures::executor::block_on(async {
             let mut inner = self.inner.lock().await;
             inner.stdout.take()
@@ -203,7 +203,7 @@ impl Execution {
     }
 
     /// Take the stderr stream (can only be called once).
-    pub fn stderr(&mut self) -> Option<ExecStderr> {
+    pub fn stderr(&self) -> Option<ExecStderr> {
         futures::executor::block_on(async {
             let mut inner = self.inner.lock().await;
             inner.stderr.take()
@@ -214,7 +214,7 @@ impl Execution {
     ///
     /// Returns the exit status once the execution finishes. If the result is
     /// already cached, returns immediately. Otherwise, waits for result from channel.
-    pub async fn wait(&mut self) -> BoxliteResult<ExecResult> {
+    pub async fn wait(&self) -> BoxliteResult<ExecResult> {
         let mut inner = self.inner.lock().await;
 
         // Check if result is already cached
@@ -237,7 +237,7 @@ impl Execution {
     }
 
     /// Kill the process (sends SIGKILL).
-    pub async fn kill(&mut self) -> BoxliteResult<()> {
+    pub async fn kill(&self) -> BoxliteResult<()> {
         self.signal(9).await // SIGKILL
     }
 
