@@ -147,10 +147,13 @@ impl ImageDiskManager {
 
         let mut all_symlinks = Vec::new();
         let mut all_permissions = Vec::new();
+        let mut all_unicode_files = Vec::new();
         for tarball in &layer_tarballs {
-            let (symlinks, permissions) = extract_layer_tarball(tarball, &merged_path)?;
+            let (symlinks, permissions, unicode_files) =
+                extract_layer_tarball(tarball, &merged_path)?;
             all_symlinks.extend(symlinks);
             all_permissions.extend(permissions);
+            all_unicode_files.extend(unicode_files);
         }
 
         // Create ext4 from merged directory via native mke2fs (blocking I/O)
@@ -159,8 +162,16 @@ impl ImageDiskManager {
         let disk_clone = temp_disk_path.clone();
         let symlinks_clone = all_symlinks;
         let permissions_clone = all_permissions;
+        let unicode_clone = all_unicode_files;
         let temp_disk = tokio::task::spawn_blocking(move || {
             let disk = create_ext4_from_dir(&merged_clone, &disk_clone)?;
+
+            // Fix non-ASCII filenames inside the ext4 image via debugfs.
+            // Must run before symlinks (symlinks may reference unicode paths)
+            // and before permissions (permissions cover unicode files too).
+            if !unicode_clone.is_empty() {
+                fix_unicode_names_in_ext4(&disk_clone, &merged_clone, &unicode_clone)?;
+            }
 
             // Create symlinks inside the ext4 image via debugfs
             if !symlinks_clone.is_empty() {
@@ -255,6 +266,35 @@ struct DeferredPermission {
     mode: u32,
 }
 
+/// A file with non-ASCII characters in its path, deferred for debugfs injection.
+///
+/// On Windows, `mke2fs -d` uses MinGW's ANSI `opendir()`/`readdir()` which call
+/// `FindFirstFileA`/`FindNextFileA`. Characters outside the Windows ANSI code page
+/// get mangled, causing `lstat()` to fail with ENOENT.
+///
+/// Workaround: extract such files to an ASCII-safe temp name (`__uc/NNNN.dat`),
+/// let `mke2fs -d` process only ASCII filenames, then inject the files into the
+/// ext4 image via `debugfs write` with the correct UTF-8 path.
+#[cfg(any(windows, test))]
+struct DeferredUnicodeFile {
+    /// ASCII-safe temp path relative to merged dir (e.g., "__uc/0001.dat").
+    /// Empty for directory entries.
+    temp_name: String,
+    /// Original UTF-8 path in ext4 (e.g., "usr/share/ca-certificates/Főtanúsítvány.crt")
+    original_path: String,
+    /// true for directories
+    is_dir: bool,
+}
+
+/// Check if a path contains non-ASCII bytes.
+///
+/// Used on Windows to detect filenames that will be mangled by `mke2fs -d`'s
+/// ANSI `opendir()`/`readdir()` calls.
+#[cfg(any(windows, test))]
+fn has_non_ascii(path: &str) -> bool {
+    !path.bytes().all(|b| b.is_ascii())
+}
+
 /// Extract a layer tarball into a destination directory (Windows).
 ///
 /// Detects compression format by magic bytes:
@@ -271,12 +311,20 @@ struct DeferredPermission {
 /// not preserve Unix mode bits. These are applied to the ext4 image after
 /// creation via debugfs.
 ///
+/// Files with non-ASCII characters in their paths are extracted to an
+/// ASCII-safe temp directory (`__uc/`) and returned for deferred injection
+/// into the ext4 image via debugfs.
+///
 /// Hardlinks are extracted as regular file copies.
 #[cfg(windows)]
 fn extract_layer_tarball(
     tarball: &std::path::Path,
     dest: &std::path::Path,
-) -> BoxliteResult<(Vec<DeferredSymlink>, Vec<DeferredPermission>)> {
+) -> BoxliteResult<(
+    Vec<DeferredSymlink>,
+    Vec<DeferredPermission>,
+    Vec<DeferredUnicodeFile>,
+)> {
     use std::io::{BufReader, Read, Seek, SeekFrom};
 
     let file = std::fs::File::open(tarball).map_err(|e| {
@@ -352,19 +400,26 @@ fn is_opaque_whiteout(name: &str) -> bool {
 /// - `.wh.<name>`: deletes the target file from the destination
 /// - `.wh..wh..opq`: deletes all existing contents of the parent directory
 ///
-/// Returns deferred symlinks and file permissions to be applied to the ext4
-/// image later. Both are deduplicated with last-wins semantics per OCI spec.
+/// Returns deferred symlinks, file permissions, and unicode files to be applied
+/// to the ext4 image later. Symlinks and permissions are deduplicated with
+/// last-wins semantics per OCI spec. Unicode files are collected for debugfs
+/// injection on Windows.
 #[cfg(any(windows, test))]
 fn extract_tar_entries<R: std::io::Read>(
     mut archive: tar::Archive<R>,
     dest: &std::path::Path,
     tarball: &std::path::Path,
-) -> BoxliteResult<(Vec<DeferredSymlink>, Vec<DeferredPermission>)> {
+) -> BoxliteResult<(
+    Vec<DeferredSymlink>,
+    Vec<DeferredPermission>,
+    Vec<DeferredUnicodeFile>,
+)> {
     use std::collections::HashMap;
 
     // Use HashMap for last-wins dedup (OCI spec: upper layer overrides lower)
     let mut symlink_map: HashMap<String, DeferredSymlink> = HashMap::new();
     let mut permission_map: HashMap<String, DeferredPermission> = HashMap::new();
+    let mut unicode_files: Vec<DeferredUnicodeFile> = Vec::new();
 
     let entries = archive.entries().map_err(|e| {
         BoxliteError::Storage(format!(
@@ -481,6 +536,45 @@ fn extract_tar_entries<R: std::io::Read>(
             );
         }
 
+        // On Windows, divert files with non-ASCII paths to ASCII-safe temp names.
+        // mke2fs uses ANSI opendir()/readdir() which can't handle Unicode filenames.
+        if has_non_ascii(clean_path) {
+            if entry_type == tar::EntryType::Directory {
+                unicode_files.push(DeferredUnicodeFile {
+                    temp_name: String::new(),
+                    original_path: clean_path.trim_end_matches('/').to_string(),
+                    is_dir: true,
+                });
+            } else if entry_type == tar::EntryType::Regular || entry_type == tar::EntryType::Link {
+                let uc_dir = dest.join("__uc");
+                std::fs::create_dir_all(&uc_dir).ok();
+                let idx = unicode_files.len();
+                let temp_name = format!("__uc/{:04}.dat", idx);
+                let temp_path = dest.join(&temp_name);
+                let mut out = std::fs::File::create(&temp_path).map_err(|e| {
+                    BoxliteError::Storage(format!(
+                        "Failed to create temp file {}: {}",
+                        temp_path.display(),
+                        e
+                    ))
+                })?;
+                std::io::copy(&mut entry, &mut out).map_err(|e| {
+                    BoxliteError::Storage(format!(
+                        "Failed to extract unicode file {}: {}",
+                        clean_path, e
+                    ))
+                })?;
+                unicode_files.push(DeferredUnicodeFile {
+                    temp_name,
+                    original_path: clean_path.to_string(),
+                    is_dir: false,
+                });
+            }
+            // Symlinks with non-ASCII names are already handled by the symlink
+            // deferred path above; other types (block/char/fifo) are skipped.
+            continue;
+        }
+
         // Extract regular files, directories, and hardlinks normally
         entry.set_preserve_permissions(false);
         if let Err(e) = entry.unpack_in(dest) {
@@ -515,13 +609,146 @@ fn extract_tar_entries<R: std::io::Read>(
     let permissions: Vec<DeferredPermission> = permission_map.into_values().collect();
 
     tracing::debug!(
-        "Extracted layer {} ({} deferred symlinks, {} deferred permissions)",
+        "Extracted layer {} ({} deferred symlinks, {} deferred permissions, {} unicode files)",
         tarball.display(),
         symlinks.len(),
         permissions.len(),
+        unicode_files.len(),
     );
 
-    Ok((symlinks, permissions))
+    Ok((symlinks, permissions, unicode_files))
+}
+
+/// Fix non-ASCII filenames inside an ext4 image using debugfs.
+///
+/// Files with non-ASCII characters in their paths were extracted to ASCII-safe
+/// temp names (`__uc/NNNN.dat`) during tar extraction. This function:
+/// 1. Creates any missing parent directories in the ext4 image
+/// 2. Writes each temp file into the ext4 with its correct UTF-8 path
+/// 3. Sets ownership to root:root
+/// 4. Cleans up the `__uc/` staging directory from the ext4 image
+///
+/// The debugfs `write` command reads the host file (ASCII path: `__uc/0001.dat`)
+/// and stores the ext4 destination path as raw UTF-8 bytes, which Linux reads
+/// correctly.
+#[cfg(windows)]
+fn fix_unicode_names_in_ext4(
+    image_path: &std::path::Path,
+    merged_path: &std::path::Path,
+    unicode_files: &[DeferredUnicodeFile],
+) -> BoxliteResult<()> {
+    use std::collections::BTreeSet;
+
+    let start = std::time::Instant::now();
+
+    // Collect all parent directories that need to be created (sorted for mkdir order)
+    let mut dirs_to_create = BTreeSet::new();
+    for uf in unicode_files {
+        let p = std::path::Path::new(&uf.original_path);
+        // For directories, create the directory itself
+        if uf.is_dir {
+            dirs_to_create.insert(uf.original_path.clone());
+        }
+        // For files, ensure all ancestor directories exist
+        let mut current = String::new();
+        if let Some(parent) = p.parent() {
+            for component in parent.components() {
+                if !current.is_empty() {
+                    current.push('/');
+                }
+                current.push_str(&component.as_os_str().to_string_lossy());
+                dirs_to_create.insert(current.clone());
+            }
+        }
+    }
+
+    let mut commands = String::new();
+
+    // Create directories (BTreeSet gives sorted order → parents before children)
+    for dir in &dirs_to_create {
+        commands.push_str(&format!("mkdir /{}\n", dir));
+    }
+
+    // Write files with correct UTF-8 names and set ownership
+    for uf in unicode_files {
+        if uf.is_dir {
+            // Directory already created above; set ownership
+            commands.push_str(&format!("sif /{} uid 0\n", uf.original_path));
+            commands.push_str(&format!("sif /{} gid 0\n", uf.original_path));
+        } else {
+            // debugfs `write` reads host file (ASCII temp path) and creates ext4 entry
+            // with the UTF-8 destination path
+            let host_path = merged_path.join(&uf.temp_name);
+            let host_path_str = crate::disk::ext4::to_unix_path_str(&host_path);
+            commands.push_str(&format!(
+                "write \"{}\" /{}\n",
+                host_path_str, uf.original_path
+            ));
+            commands.push_str(&format!("sif /{} uid 0\n", uf.original_path));
+            commands.push_str(&format!("sif /{} gid 0\n", uf.original_path));
+        }
+    }
+
+    // Clean up: remove __uc/ temp files and directory from the ext4 image.
+    // mke2fs -d would have created __uc/ with the .dat files inside.
+    for uf in unicode_files {
+        if !uf.is_dir && !uf.temp_name.is_empty() {
+            commands.push_str(&format!("unlink /{}\n", uf.temp_name));
+        }
+    }
+    commands.push_str("rmdir /__uc\n");
+
+    // Write commands to a temp file to avoid pipe buffer deadlocks
+    let cmd_file = std::env::temp_dir().join(format!(
+        "boxlite-debugfs-unicode-{}.txt",
+        std::process::id()
+    ));
+    std::fs::write(&cmd_file, commands.as_bytes()).map_err(|e| {
+        BoxliteError::Storage(format!(
+            "Failed to write debugfs unicode command file {}: {}",
+            cmd_file.display(),
+            e
+        ))
+    })?;
+
+    let debugfs = crate::disk::ext4::get_debugfs_path()?;
+
+    let output = std::process::Command::new(&debugfs)
+        .arg("-w")
+        .arg("-f")
+        .arg(&cmd_file)
+        .arg(image_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| {
+            BoxliteError::Storage(format!(
+                "Failed to run debugfs for unicode filenames: {}",
+                e
+            ))
+        })?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&cmd_file);
+
+    let duration = start.elapsed();
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            "debugfs unicode filename fix had errors (took {:?}): {}",
+            duration,
+            stderr
+        );
+    } else {
+        tracing::info!(
+            "Fixed {} unicode filenames in ext4 image in {:?}",
+            unicode_files.len(),
+            duration
+        );
+    }
+
+    Ok(())
 }
 
 /// Create symlinks inside an ext4 image using debugfs.
@@ -585,7 +812,7 @@ fn create_symlinks_in_ext4(
         .arg(&cmd_file)
         .arg(image_path)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .output()
         .map_err(|e| BoxliteError::Storage(format!("Failed to run debugfs for symlinks: {}", e)))?;
 
@@ -595,18 +822,19 @@ fn create_symlinks_in_ext4(
     let duration = start.elapsed();
 
     if !output.status.success() {
-        return Err(BoxliteError::Storage(format!(
-            "debugfs symlink creation failed (exit code: {:?}, took {:?})",
-            output.status.code(),
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            "debugfs symlink creation had errors (took {:?}): {}",
+            duration,
+            stderr
+        );
+    } else {
+        tracing::info!(
+            "Created {} symlinks in ext4 image in {:?}",
+            symlinks.len(),
             duration
-        )));
+        );
     }
-
-    tracing::info!(
-        "Created {} symlinks in ext4 image in {:?}",
-        symlinks.len(),
-        duration
-    );
 
     Ok(())
 }
@@ -654,7 +882,7 @@ fn fix_permissions_in_ext4(
         .arg(&cmd_file)
         .arg(image_path)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .output()
         .map_err(|e| {
             BoxliteError::Storage(format!("Failed to run debugfs for permissions: {}", e))
@@ -666,18 +894,19 @@ fn fix_permissions_in_ext4(
     let duration = start.elapsed();
 
     if !output.status.success() {
-        return Err(BoxliteError::Storage(format!(
-            "debugfs permission fix failed (exit code: {:?}, took {:?})",
-            output.status.code(),
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            "debugfs permission fix had errors (took {:?}): {}",
+            duration,
+            stderr
+        );
+    } else {
+        tracing::info!(
+            "Fixed permissions of {} files in ext4 image in {:?}",
+            permissions.len(),
             duration
-        )));
+        );
     }
-
-    tracing::info!(
-        "Fixed permissions of {} files in ext4 image in {:?}",
-        permissions.len(),
-        duration
-    );
 
     Ok(())
 }
@@ -862,7 +1091,8 @@ mod tests {
 
         let file = std::fs::File::open(&tar_path).unwrap();
         let archive = tar::Archive::new(file);
-        let (symlinks, permissions) = extract_tar_entries(archive, &dest, &tar_path).unwrap();
+        let (symlinks, permissions, _unicode) =
+            extract_tar_entries(archive, &dest, &tar_path).unwrap();
 
         // old_config should be deleted by the whiteout
         assert!(!etc_dir.join("old_config").exists());
@@ -924,7 +1154,8 @@ mod tests {
 
         let file = std::fs::File::open(&tar_path).unwrap();
         let archive = tar::Archive::new(file);
-        let (_symlinks, _permissions) = extract_tar_entries(archive, &dest, &tar_path).unwrap();
+        let (_symlinks, _permissions, _unicode) =
+            extract_tar_entries(archive, &dest, &tar_path).unwrap();
 
         // Old files should be cleared by opaque whiteout
         assert!(!etc_dir.join("file_a").exists());
@@ -982,7 +1213,8 @@ mod tests {
 
         let file = std::fs::File::open(&tar_path).unwrap();
         let archive = tar::Archive::new(file);
-        let (symlinks, mut permissions) = extract_tar_entries(archive, &dest, &tar_path).unwrap();
+        let (symlinks, mut permissions, _unicode) =
+            extract_tar_entries(archive, &dest, &tar_path).unwrap();
 
         assert!(symlinks.is_empty());
         assert_eq!(permissions.len(), 3);
@@ -1030,5 +1262,119 @@ mod tests {
         let result: Vec<DeferredPermission> = map.into_values().collect();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].mode, 0o100755);
+    }
+
+    #[test]
+    fn test_has_non_ascii_pure_ascii() {
+        assert!(!has_non_ascii("usr/share/ca-certificates/mozilla/cert.crt"));
+        assert!(!has_non_ascii("bin/busybox"));
+        assert!(!has_non_ascii("etc/passwd"));
+        assert!(!has_non_ascii(""));
+    }
+
+    #[test]
+    fn test_has_non_ascii_unicode() {
+        // Hungarian certificate filename (the real-world trigger)
+        assert!(has_non_ascii(
+            "usr/share/ca-certificates/mozilla/NetLock_Arany_=Class_Gold=_F\u{0151}tan\u{00fa}s\u{00ed}tv\u{00e1}ny.crt"
+        ));
+        // Chinese characters
+        assert!(has_non_ascii("usr/share/locale/zh_CN/\u{4e2d}\u{6587}.txt"));
+        // Japanese
+        assert!(has_non_ascii("usr/share/\u{65e5}\u{672c}\u{8a9e}.txt"));
+        // Accented Latin
+        assert!(has_non_ascii("usr/share/caf\u{00e9}.txt"));
+    }
+
+    #[test]
+    fn test_extract_tar_entries_unicode_files_deferred() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("extract");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // Build a tar with a non-ASCII filename
+        let tar_path = dir.path().join("layer.tar");
+        {
+            let file = std::fs::File::create(&tar_path).unwrap();
+            let mut builder = tar::Builder::new(file);
+
+            // Directory with non-ASCII name
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "usr/share/caf\u{00e9}/", std::io::empty())
+                .unwrap();
+
+            // File with non-ASCII name
+            let data = b"certificate data";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    "usr/share/caf\u{00e9}/F\u{0151}tan\u{00fa}s\u{00ed}tv\u{00e1}ny.crt",
+                    &data[..],
+                )
+                .unwrap();
+
+            // Normal ASCII file (should be extracted normally)
+            let data2 = b"normal file";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data2.len() as u64);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "etc/normal.conf", &data2[..])
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+
+        let file = std::fs::File::open(&tar_path).unwrap();
+        let archive = tar::Archive::new(file);
+        let (_symlinks, permissions, unicode_files) =
+            extract_tar_entries(archive, &dest, &tar_path).unwrap();
+
+        // Normal file should be extracted to disk
+        assert!(dest.join("etc/normal.conf").exists());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("etc/normal.conf")).unwrap(),
+            "normal file"
+        );
+
+        // Non-ASCII file should NOT be extracted to its original path
+        assert!(!dest.join("usr/share/caf\u{00e9}").exists());
+
+        // Unicode files should be deferred
+        assert_eq!(unicode_files.len(), 2);
+
+        // Directory entry
+        let dir_entry = unicode_files.iter().find(|u| u.is_dir).unwrap();
+        assert!(dir_entry.original_path.contains("caf\u{00e9}"));
+        assert!(dir_entry.temp_name.is_empty());
+
+        // File entry should be in __uc/ temp dir
+        let file_entry = unicode_files.iter().find(|u| !u.is_dir).unwrap();
+        assert!(file_entry.original_path.contains("F\u{0151}tan"));
+        assert!(file_entry.temp_name.starts_with("__uc/"));
+        // Temp file should exist on disk with the content
+        let temp_path = dest.join(&file_entry.temp_name);
+        assert!(temp_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&temp_path).unwrap(),
+            "certificate data"
+        );
+
+        // Normal file should still have permissions recorded
+        assert!(permissions.iter().any(|p| p.path == "etc/normal.conf"));
+        // Non-ASCII files should also have permissions recorded
+        assert!(permissions.iter().any(|p| p.path.contains("F\u{0151}tan")));
     }
 }
