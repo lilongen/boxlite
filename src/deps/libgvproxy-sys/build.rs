@@ -3,11 +3,14 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-/// Builds libgvproxy from Go sources as a C static archive.
+/// Builds libgvproxy from Go sources as a C static archive (Unix only).
 ///
 /// Steps:
 /// 1. Downloads Go module dependencies
 /// 2. Compiles Go code as a C archive (static library)
+///
+/// On Windows, gvproxy is built as a DLL (c-shared) and cross-compiled from
+/// macOS. Use LIBGVPROXY_PREBUILT to supply the pre-built import library.
 fn build_gvproxy(source_dir: &Path, output_path: &Path) {
     println!("cargo:warning=Building libgvproxy from Go sources...");
 
@@ -93,7 +96,7 @@ fn main() {
 
     let source_dir = Path::new(&manifest_dir).join("gvproxy-bridge");
     // On Unix: linker auto-prepends "lib" → looks for "libgvproxy.a"
-    // On Windows: linker uses exact name → looks for "gvproxy.lib"
+    // On Windows: import library for DLL linkage → "gvproxy.lib"
     let lib_output = if cfg!(target_os = "windows") {
         Path::new(&out_dir).join("gvproxy.lib")
     } else {
@@ -101,7 +104,12 @@ fn main() {
     };
 
     // Check for pre-built library (cross-compiled on macOS for Windows).
-    // Set LIBGVPROXY_PREBUILT=/path/to/libgvproxy.lib to skip Go build entirely.
+    //
+    // On Windows: LIBGVPROXY_PREBUILT points to the import library (.lib, ~6 KB).
+    //   A sibling gvproxy.dll must also exist — it gets copied to OUT_DIR so
+    //   boxlite/build.rs can bundle it into the runtime directory.
+    //
+    // On Unix: LIBGVPROXY_PREBUILT points to the static archive (libgvproxy.a).
     if let Ok(prebuilt) = env::var("LIBGVPROXY_PREBUILT") {
         let prebuilt_path = Path::new(&prebuilt);
         if prebuilt_path.exists() {
@@ -110,6 +118,34 @@ fn main() {
                 prebuilt_path.display()
             );
             fs::copy(prebuilt_path, &lib_output).expect("Failed to copy pre-built libgvproxy");
+
+            // On Windows: also copy the sibling DLL for runtime bundling.
+            // boxlite/build.rs scans OUT_DIR via LIBGVPROXY_BOXLITE_DEP and
+            // copies .dll files to the runtime directory.
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(prebuilt_dir) = prebuilt_path.parent() {
+                    let dll_src = prebuilt_dir.join("gvproxy.dll");
+                    if dll_src.exists() {
+                        let dll_dst = Path::new(&out_dir).join("gvproxy.dll");
+                        fs::copy(&dll_src, &dll_dst).expect("Failed to copy gvproxy.dll");
+                        println!(
+                            "cargo:warning=Copied gvproxy.dll ({:.1} MB)",
+                            fs::metadata(&dll_dst).map(|m| m.len()).unwrap_or(0) as f64
+                                / (1024.0 * 1024.0)
+                        );
+                    } else {
+                        println!(
+                            "cargo:warning=WARNING: gvproxy.dll not found next to {}",
+                            prebuilt_path.display()
+                        );
+                        println!("cargo:warning=  Expected at: {}", dll_src.display());
+                        println!(
+                            "cargo:warning=  The shim will fail at runtime without gvproxy.dll"
+                        );
+                    }
+                }
+            }
 
             // Copy header if present alongside the library
             let prebuilt_header = prebuilt_path.with_extension("h");
@@ -141,9 +177,15 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out_dir);
 
     // On Windows: link dynamically via import library (.lib thunks → .dll at runtime).
-    // Go's c-archive static linking causes Go runtime to auto-initialize at process
-    // startup, which creates threads that interfere with WHPX. Using a DLL defers
-    // Go runtime initialization until gvproxy_create() is first called.
+    //
+    // gvproxy is built as a DLL (c-shared) on Windows. Go's internal linker handles
+    // all MinGW/.pdata internally within the DLL, so MSVC's link.exe only sees the
+    // clean import library (~6 KB). This avoids the LNK1223 (.pdata) error that
+    // occurs when MSVC tries to link a c-archive containing Go's runtime objects.
+    //
+    // DELAYLOAD (in boxlite/build.rs) defers DLL loading until the first FFI call,
+    // preventing Go runtime thread creation from interfering with WHPX.
+    //
     // On Unix: link statically (c-archive works fine with KVM/Hypervisor.framework).
     //
     // NOTE: DELAYLOAD linker flags are in boxlite/build.rs (the binary crate), not here.
