@@ -183,14 +183,13 @@ fn main() {
     // clean import library (~6 KB). This avoids the LNK1223 (.pdata) error that
     // occurs when MSVC tries to link a c-archive containing Go's runtime objects.
     //
-    // DELAYLOAD (in boxlite/build.rs) defers DLL loading until the first FFI call,
-    // preventing Go runtime thread creation from interfering with WHPX.
+    // IMPORTANT: The DLL approach is REQUIRED on Windows. The static c-archive
+    // (libgvproxy.lib ~40 MB) hangs on Win11 — Go's _cgo_wait_runtime_init_done()
+    // deadlocks when the Go runtime is statically embedded in a Rust/MSVC binary.
+    // The DLL (c-shared) avoids this because Go's runtime initializes inside its
+    // own DllMain, isolated from the host process's link-time dependencies.
     //
     // On Unix: link statically (c-archive works fine with KVM/Hypervisor.framework).
-    //
-    // NOTE: DELAYLOAD linker flags are in boxlite/build.rs (the binary crate), not here.
-    // cargo:rustc-link-arg from a library crate's build.rs doesn't propagate to the
-    // final binary link step — it only applies to the crate that emits it.
     #[cfg(target_os = "windows")]
     {
         println!("cargo:rustc-link-lib=dylib=gvproxy");

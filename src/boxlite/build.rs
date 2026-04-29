@@ -939,20 +939,13 @@ fn main() {
     #[cfg(target_os = "linux")]
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
 
-    // Windows + gvproxy: DELAYLOAD linker flags for gvproxy.dll.
+    // Windows: gvproxy is linked dynamically via its DLL import library (gvproxy.lib,
+    // ~7 KB). The Go runtime initializes inside gvproxy.dll's DllMain at process
+    // startup, which works correctly with MSVC-linked Rust binaries.
     //
-    // These MUST be in this crate's build.rs (the crate with [[bin]] boxlite-shim),
-    // not in libgvproxy-sys/build.rs. cargo:rustc-link-arg from a dependency's
-    // build.rs only applies to that crate, not to the final binary link step.
-    //
-    // DELAYLOAD defers gvproxy.dll loading until the first gvproxy FFI call
-    // (gvproxy_create). Without it, the DLL loads at process startup, causing
-    // Go runtime auto-initialization and thread creation that interfere with WHPX.
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os == "windows" && env::var("CARGO_FEATURE_GVPROXY").is_ok() {
-        println!("cargo:rustc-link-arg=/DELAYLOAD:gvproxy.dll");
-        println!("cargo:rustc-link-arg=delayimp.lib");
-    }
+    // NOTE: Do NOT use the static CGO archive (libgvproxy.lib, ~40 MB) on Windows.
+    // The statically embedded Go runtime hangs on Win11 during _cgo_wait_runtime_init_done().
+    // The DLL approach (c-shared buildmode) avoids this entirely.
 }
 
 /// Compute SHA256 hash of the `boxlite-guest` binary and embed it via `cargo:rustc-env`.
