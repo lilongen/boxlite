@@ -324,9 +324,13 @@ impl Vmm for Krun {
             tracing::debug!("Creating libkrun context");
             let mut ctx = KrunContext::create()?;
 
-            tracing::debug!("Setting VM config: 4 CPUs, 4096MB memory");
-            // Configure VM like chroot_vm example: 4 CPUs and 4096MB memory
-            ctx.set_vm_config(config.cpus.unwrap_or(4), config.memory_mib.unwrap_or(4096))?;
+            let cpus = config.cpus.unwrap_or(4);
+            // On Windows WHPX, limit to 2 vCPUs. 4+ vCPUs causes BSP hang during
+            // SMP timer calibration — under investigation. 2 vCPUs works reliably.
+            #[cfg(not(unix))]
+            let cpus = cpus.min(2).max(1);
+            tracing::debug!("Setting VM config: {} CPUs, 4096MB memory", cpus);
+            ctx.set_vm_config(cpus, config.memory_mib.unwrap_or(4096))?;
 
             // On Windows (WHPX), the kernel is NOT embedded in libkrunfw — it must be
             // provided explicitly. Discover vmlinuz and initrd from the runtime directory.
