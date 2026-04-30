@@ -126,6 +126,9 @@ impl<'a> ShimSpawner<'a> {
             BoxliteError::Engine(err_msg)
         })?;
 
+        // 7b. Post-spawn sandbox setup (Windows: Job Object assignment)
+        jail.post_spawn(&child)?;
+
         // 8. Write config to stdin, then close (shim reads until EOF).
         // The child is already spawned and will read from stdin, so this is a
         // producer-consumer pattern via the kernel pipe buffer. For typical

@@ -8,12 +8,9 @@
 //!
 //! # Current Status
 //!
-//! Infrastructure-only. The Windows WHPX VM runs in-process via `krun_start()`,
-//! so no shim subprocess exists yet. This sandbox is ready for when a Windows
-//! shim is introduced — it creates a properly configured Job Object that can
-//! be assigned to a child process via `AssignProcessToJobObject`.
-//!
-//! `PlatformSandbox` remains `NoopSandbox` on Windows until the shim is ready.
+//! Active. The Windows WHPX shim runs as a subprocess (`boxlite-shim.exe`).
+//! `post_spawn()` assigns the child process to the Job Object after spawn,
+//! enforcing kill-on-close and resource limits.
 
 #![cfg(target_os = "windows")]
 
@@ -23,10 +20,12 @@ use std::process::Command;
 use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectExtendedLimitInformation, SetInformationJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject,
 };
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
 
 /// Job Object-based sandbox for Windows process isolation.
 ///
@@ -36,11 +35,7 @@ use windows_sys::Win32::System::JobObjects::{
 /// - **Kill-on-close**: All processes terminate when the handle drops.
 /// - **Memory limit**: Hard cap on committed memory (from `max_memory`).
 /// - **Process limit**: Maximum active processes (from `max_processes`).
-///
-/// # Future
-///
-/// When a Windows shim process is introduced, `post_spawn()` will be added
-/// to assign the child process to this Job Object.
+#[derive(Debug)]
 pub struct JobSandbox {
     /// Job Object handle, set after `setup()`. Protected by Mutex for
     /// Send+Sync (HANDLE is a raw pointer type).
@@ -52,6 +47,11 @@ impl JobSandbox {
         Self {
             job_handle: Mutex::new(INVALID_HANDLE_VALUE),
         }
+    }
+
+    /// Platform constructor alias (used by [`JailerBuilder`](super::super::JailerBuilder)).
+    pub fn platform_new() -> Self {
+        Self::new()
     }
 
     /// Create a Job Object with limits from the sandbox context.
@@ -122,12 +122,44 @@ impl Sandbox for JobSandbox {
     }
 
     fn apply(&self, _ctx: &SandboxContext, _cmd: &mut Command) {
-        // No-op for now: Job Object assignment to child process requires
-        // `AssignProcessToJobObject` after spawn. This will be wired when
-        // the Windows shim subprocess is introduced.
-        //
-        // The Job Object handle is preserved in self.job_handle for future
-        // post_spawn() use.
+        // No pre-spawn command modifications needed.
+        // Job Object assignment happens in post_spawn() after the child is spawned.
+    }
+
+    fn post_spawn(&self, child: &std::process::Child) -> BoxliteResult<()> {
+        let job_handle = self
+            .job_handle
+            .lock()
+            .map_err(|e| BoxliteError::Internal(format!("Job Object mutex poisoned: {e}")))?;
+
+        if *job_handle == INVALID_HANDLE_VALUE || (*job_handle).is_null() {
+            return Err(BoxliteError::Internal(
+                "Job Object not initialized (setup() not called)".into(),
+            ));
+        }
+
+        let access = PROCESS_SET_QUOTA | PROCESS_TERMINATE;
+        let child_handle = unsafe { OpenProcess(access, 0, child.id()) };
+        if child_handle.is_null() {
+            return Err(BoxliteError::Internal(format!(
+                "Failed to open child process {}: {}",
+                child.id(),
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let result = unsafe { AssignProcessToJobObject(*job_handle, child_handle) };
+        unsafe { CloseHandle(child_handle) };
+
+        if result == 0 {
+            return Err(BoxliteError::Internal(format!(
+                "AssignProcessToJobObject failed for PID {}: {}",
+                child.id(),
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        Ok(())
     }
 
     fn name(&self) -> &'static str {
@@ -165,6 +197,48 @@ mod tests {
     fn test_job_sandbox_name() {
         let sandbox = JobSandbox::new();
         assert_eq!(sandbox.name(), "job-object");
+    }
+
+    #[test]
+    fn test_post_spawn_without_setup_fails() {
+        let sandbox = JobSandbox::new();
+        let child = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("echo test")
+            .spawn()
+            .unwrap();
+        let result = sandbox.post_spawn(&child);
+        assert!(result.is_err(), "post_spawn without setup should fail");
+    }
+
+    #[test]
+    fn test_post_spawn_assigns_to_job_object() {
+        use crate::runtime::advanced_options::ResourceLimits;
+
+        let sandbox = JobSandbox::new();
+        let limits = ResourceLimits::default();
+        let ctx = SandboxContext {
+            id: "test-post-spawn",
+            paths: Vec::new(),
+            resource_limits: &limits,
+            network_enabled: false,
+            sandbox_profile: None,
+        };
+
+        sandbox.setup(&ctx).unwrap();
+
+        // Spawn a short-lived child process
+        let child = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("echo hello")
+            .spawn()
+            .unwrap();
+
+        let result = sandbox.post_spawn(&child);
+        assert!(
+            result.is_ok(),
+            "post_spawn should succeed after setup: {result:?}"
+        );
     }
 
     #[test]

@@ -437,9 +437,11 @@ mod tests {
 
     #[test]
     fn test_keepalive_drop_signals_event() {
-        use windows_sys::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE,
+        };
         use windows_sys::Win32::System::Threading::{
-            DuplicateHandle, GetCurrentProcess, WaitForSingleObject,
+            GetCurrentProcess, WaitForSingleObject,
         };
 
         // Create a duplicate event to observe the signal after Keepalive is dropped.

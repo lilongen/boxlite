@@ -420,6 +420,17 @@ impl<S: Sandbox> Jail for Jailer<S> {
 }
 
 impl<S: Sandbox> Jailer<S> {
+    /// Post-spawn sandbox hook.
+    ///
+    /// Delegates to the sandbox's `post_spawn()` for platform-specific
+    /// child process setup (e.g., Windows Job Object assignment).
+    pub fn post_spawn(&self, child: &std::process::Child) -> BoxliteResult<()> {
+        if self.security.jailer_enabled && self.sandbox.is_available() {
+            self.sandbox.post_spawn(child)?;
+        }
+        Ok(())
+    }
+
     /// Get the security options.
     pub fn security(&self) -> &SecurityOptions {
         &self.security
