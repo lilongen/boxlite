@@ -167,8 +167,12 @@ impl Keepalive {
     /// Signal the shutdown event, triggering shim graceful shutdown.
     pub fn signal(&self) {
         use windows_sys::Win32::System::Threading::SetEvent;
-        unsafe {
-            SetEvent(self.event);
+        let result = unsafe { SetEvent(self.event) };
+        if result == 0 {
+            tracing::warn!(
+                "SetEvent failed for shutdown event: {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
 }
@@ -438,11 +442,9 @@ mod tests {
     #[test]
     fn test_keepalive_drop_signals_event() {
         use windows_sys::Win32::Foundation::{
-            CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE,
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE,
         };
-        use windows_sys::Win32::System::Threading::{
-            GetCurrentProcess, WaitForSingleObject,
-        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, WaitForSingleObject};
 
         // Create a duplicate event to observe the signal after Keepalive is dropped.
         // We can't use the Keepalive's handle after drop (it's closed),

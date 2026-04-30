@@ -115,6 +115,15 @@ impl<'a> ShimSpawner<'a> {
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::from(stderr_file));
 
+        // 6b. Spawn suspended on Windows to eliminate TOCTOU between spawn and
+        // Job Object assignment. The process is created but no threads run until
+        // we explicitly resume after assigning it to the Job Object.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+        }
+
         // 7. Spawn
         let mut child = cmd.spawn().map_err(|e| {
             let err_msg = format!(
@@ -128,6 +137,11 @@ impl<'a> ShimSpawner<'a> {
 
         // 7b. Post-spawn sandbox setup (Windows: Job Object assignment)
         jail.post_spawn(&child)?;
+
+        // 7c. Resume the suspended process now that it's inside the Job Object.
+        // This ensures the process never runs outside sandbox isolation.
+        #[cfg(windows)]
+        resume_suspended_process(child.id())?;
 
         // 8. Write config to stdin, then close (shim reads until EOF).
         // The child is already spawned and will read from stdin, so this is a
@@ -205,6 +219,66 @@ impl<'a> ShimSpawner<'a> {
             ))
         })
     }
+}
+
+/// Resume all threads of a suspended process.
+///
+/// After spawning with `CREATE_SUSPENDED`, the process exists but no threads
+/// are running. This function enumerates all threads belonging to the process
+/// using the Toolhelp32 snapshot API and resumes each one.
+///
+/// # Errors
+/// Returns an error if the thread snapshot fails or no threads are found.
+#[cfg(windows)]
+fn resume_suspended_process(pid: u32) -> BoxliteResult<()> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(BoxliteError::Engine(format!(
+            "CreateToolhelp32Snapshot failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+
+    let mut resumed = 0u32;
+
+    let ok = unsafe { Thread32First(snapshot, &mut entry) };
+    if ok != 0 {
+        loop {
+            if entry.th32OwnerProcessID == pid {
+                let thread_handle =
+                    unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if !thread_handle.is_null() {
+                    unsafe { ResumeThread(thread_handle) };
+                    unsafe { CloseHandle(thread_handle) };
+                    resumed += 1;
+                }
+            }
+            let next = unsafe { Thread32Next(snapshot, &mut entry) };
+            if next == 0 {
+                break;
+            }
+        }
+    }
+
+    unsafe { CloseHandle(snapshot) };
+
+    if resumed == 0 {
+        return Err(BoxliteError::Engine(format!(
+            "No threads found to resume for PID {}",
+            pid
+        )));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -324,5 +398,56 @@ mod tests {
         assert!(!envs.contains_key(OsStr::new("TMPDIR")));
         assert!(!envs.contains_key(OsStr::new("TMP")));
         assert!(!envs.contains_key(OsStr::new("TEMP")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_create_suspended_and_resume() {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{
+            CREATE_SUSPENDED, WAIT_TIMEOUT, WaitForSingleObject,
+        };
+
+        // Spawn a process in suspended state
+        let child = std::process::Command::new("cmd")
+            .args(["/c", "echo hello"])
+            .creation_flags(CREATE_SUSPENDED)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn suspended process");
+
+        let pid = child.id();
+
+        // Process should exist but be suspended — WaitForSingleObject should timeout
+        let handle = unsafe {
+            windows_sys::Win32::System::Threading::OpenProcess(
+                windows_sys::Win32::System::Threading::SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        assert!(
+            !handle.is_null(),
+            "should be able to open suspended process"
+        );
+
+        let wait_result = unsafe { WaitForSingleObject(handle, 50) };
+        assert_eq!(
+            wait_result, WAIT_TIMEOUT,
+            "suspended process should not have exited yet"
+        );
+
+        // Resume the process
+        resume_suspended_process(pid).expect("resume should succeed");
+
+        // Now the process should complete quickly
+        let wait_result = unsafe { WaitForSingleObject(handle, 5000) };
+        assert_eq!(
+            wait_result, 0,
+            "process should complete after resume (WAIT_OBJECT_0)"
+        );
+
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
     }
 }

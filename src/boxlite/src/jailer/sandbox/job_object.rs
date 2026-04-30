@@ -21,8 +21,12 @@ use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
-    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT_DESKTOP,
+    JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
+    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, QueryInformationJobObject,
     SetInformationJobObject,
 };
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
@@ -59,9 +63,10 @@ impl JobSandbox {
         // Create unnamed Job Object
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
-            return Err(BoxliteError::Internal(
-                "Failed to create Windows Job Object".into(),
-            ));
+            return Err(BoxliteError::Internal(format!(
+                "Failed to create Windows Job Object: {}",
+                std::io::Error::last_os_error()
+            )));
         }
 
         // Configure limits
@@ -70,6 +75,10 @@ impl JobSandbox {
 
         // Always kill all processes when Job Object handle is closed
         limit_flags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        // Terminate processes that trigger unhandled exceptions instead of
+        // showing the Windows Error Reporting dialog (blocks the process)
+        limit_flags |= JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
 
         // Memory limit
         if let Some(max_memory) = ctx.resource_limits.max_memory {
@@ -95,10 +104,39 @@ impl JobSandbox {
         };
 
         if result == 0 {
+            let err = std::io::Error::last_os_error();
             unsafe { CloseHandle(handle) };
-            return Err(BoxliteError::Internal(
-                "Failed to set Job Object limits".into(),
-            ));
+            return Err(BoxliteError::Internal(format!(
+                "Failed to set Job Object limits: {}",
+                err
+            )));
+        }
+
+        // Apply UI restrictions to prevent sandbox escape via desktop/display manipulation
+        let ui_restrictions = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+            UIRestrictionsClass: JOB_OBJECT_UILIMIT_DESKTOP
+                | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+                | JOB_OBJECT_UILIMIT_EXITWINDOWS
+                | JOB_OBJECT_UILIMIT_GLOBALATOMS
+                | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
+        };
+
+        let result = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectBasicUIRestrictions,
+                &ui_restrictions as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+            )
+        };
+
+        if result == 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe { CloseHandle(handle) };
+            return Err(BoxliteError::Internal(format!(
+                "Failed to set Job Object UI restrictions: {}",
+                err
+            )));
         }
 
         Ok(handle)
@@ -265,6 +303,109 @@ mod tests {
             handle, INVALID_HANDLE_VALUE,
             "Handle should not be INVALID_HANDLE_VALUE"
         );
+        unsafe { CloseHandle(handle) };
+    }
+
+    #[test]
+    fn test_job_object_has_die_on_exception_and_kill_on_close() {
+        use crate::runtime::advanced_options::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let ctx = SandboxContext {
+            id: "test-flags",
+            paths: Vec::new(),
+            resource_limits: &limits,
+            network_enabled: false,
+            sandbox_profile: None,
+        };
+
+        let handle = JobSandbox::create_job_object(&ctx).unwrap();
+
+        // Query the extended limit information to verify flags
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        let mut ret_len: u32 = 0;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &mut info as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                &mut ret_len,
+            )
+        };
+        assert_ne!(ok, 0, "QueryInformationJobObject should succeed");
+
+        let flags = info.BasicLimitInformation.LimitFlags;
+        assert_ne!(
+            flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            0,
+            "KILL_ON_JOB_CLOSE flag must be set"
+        );
+        assert_ne!(
+            flags & JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
+            0,
+            "DIE_ON_UNHANDLED_EXCEPTION flag must be set"
+        );
+
+        unsafe { CloseHandle(handle) };
+    }
+
+    #[test]
+    fn test_job_object_has_ui_restrictions() {
+        use crate::runtime::advanced_options::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let ctx = SandboxContext {
+            id: "test-ui",
+            paths: Vec::new(),
+            resource_limits: &limits,
+            network_enabled: false,
+            sandbox_profile: None,
+        };
+
+        let handle = JobSandbox::create_job_object(&ctx).unwrap();
+
+        // Query UI restrictions
+        let mut ui_info: JOBOBJECT_BASIC_UI_RESTRICTIONS = unsafe { std::mem::zeroed() };
+        let mut ret_len: u32 = 0;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                handle,
+                JobObjectBasicUIRestrictions,
+                &mut ui_info as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+                &mut ret_len,
+            )
+        };
+        assert_ne!(ok, 0, "QueryInformationJobObject should succeed");
+
+        let ui_flags = ui_info.UIRestrictionsClass;
+        assert_ne!(
+            ui_flags & JOB_OBJECT_UILIMIT_DESKTOP,
+            0,
+            "UILIMIT_DESKTOP must be set"
+        );
+        assert_ne!(
+            ui_flags & JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
+            0,
+            "UILIMIT_DISPLAYSETTINGS must be set"
+        );
+        assert_ne!(
+            ui_flags & JOB_OBJECT_UILIMIT_EXITWINDOWS,
+            0,
+            "UILIMIT_EXITWINDOWS must be set"
+        );
+        assert_ne!(
+            ui_flags & JOB_OBJECT_UILIMIT_GLOBALATOMS,
+            0,
+            "UILIMIT_GLOBALATOMS must be set"
+        );
+        assert_ne!(
+            ui_flags & JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
+            0,
+            "UILIMIT_SYSTEMPARAMETERS must be set"
+        );
+
         unsafe { CloseHandle(handle) };
     }
 }

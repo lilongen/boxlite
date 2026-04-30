@@ -157,28 +157,6 @@ fn create_or_reuse_cow_disk(
     if let Strategy::Disk { ref disk_path, .. } = guest_rootfs.strategy {
         let base_disk_path = disk_path;
 
-        // On Windows, copy the base ext4 as a raw disk — QCOW2 backing files
-        // are not supported by the WHPX VMM.
-        #[cfg(windows)]
-        let disk = {
-            std::fs::copy(base_disk_path, &guest_rootfs_disk_path).map_err(|e| {
-                BoxliteError::Storage(format!(
-                    "Failed to copy guest rootfs {} to {}: {}",
-                    base_disk_path.display(),
-                    guest_rootfs_disk_path.display(),
-                    e
-                ))
-            })?;
-            let d = Disk::new(guest_rootfs_disk_path.clone(), DiskFormat::Ext4, true);
-            tracing::info!(
-                disk = %guest_rootfs_disk_path.display(),
-                base_disk = %base_disk_path.display(),
-                "Created guest rootfs (raw copy, persistent)"
-            );
-            d
-        };
-
-        #[cfg(not(windows))]
         let disk = {
             // Get base disk size
             let base_size = std::fs::metadata(base_disk_path)

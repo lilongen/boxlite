@@ -163,16 +163,9 @@ async fn build_config(
     // Unix: virtiofs, Windows: virtio-9p (guest auto-detects)
     volume_mgr.add_fs_share(mount_tags::SHARED, layout.shared_dir(), None, false, None);
 
-    // Add container rootfs disk:
-    // - Unix: QCOW2 COW overlay on top of shared base ext4 image
-    // - Windows: raw ext4 copy (WHPX VMM doesn't support QCOW2 backing files)
+    // Add container rootfs disk (QCOW2 COW overlay on top of shared base ext4 image).
     // Guest mount: Only resize on fresh start with custom disk size, not restart.
     let need_resize = options.disk_size_gb.is_some() && !reuse_rootfs;
-
-    // On Windows, rootfs disks are raw ext4 copies (no QCOW2 COW support in WHPX VMM).
-    #[cfg(windows)]
-    let container_disk_format = DiskFormat::Ext4;
-    #[cfg(not(windows))]
     let container_disk_format = DiskFormat::Qcow2;
 
     let rootfs_device = volume_mgr.add_block_device(
@@ -274,9 +267,6 @@ fn configure_guest_rootfs(
         && let Strategy::Disk { ref disk_path, .. } = guest_rootfs.strategy
     {
         // Add disk to volume manager (guest rootfs - no format/resize needed)
-        #[cfg(windows)]
-        let guest_disk_format = DiskFormat::Ext4;
-        #[cfg(not(windows))]
         let guest_disk_format = DiskFormat::Qcow2;
 
         let device_path = volume_mgr.add_block_device(

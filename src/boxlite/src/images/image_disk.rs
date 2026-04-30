@@ -619,6 +619,23 @@ fn extract_tar_entries<R: std::io::Read>(
     Ok((symlinks, permissions, unicode_files))
 }
 
+/// Sanitize a path for use in debugfs commands.
+///
+/// Rejects paths containing characters that could inject additional debugfs
+/// commands or break command parsing. Debugfs commands are line-oriented and
+/// use double quotes for paths, so newlines, carriage returns, null bytes,
+/// and double quotes are all dangerous.
+#[cfg(any(windows, test))]
+fn sanitize_debugfs_path(path: &str) -> BoxliteResult<&str> {
+    if path.contains('\n') || path.contains('\r') || path.contains('\0') || path.contains('"') {
+        return Err(BoxliteError::Image(format!(
+            "OCI layer path contains unsafe characters for debugfs: {:?}",
+            path
+        )));
+    }
+    Ok(path)
+}
+
 /// Fix non-ASCII filenames inside an ext4 image using debugfs.
 ///
 /// Files with non-ASCII characters in their paths were extracted to ASCII-safe
@@ -640,6 +657,14 @@ fn fix_unicode_names_in_ext4(
     use std::collections::BTreeSet;
 
     let start = std::time::Instant::now();
+
+    // Sanitize all paths before building debugfs commands
+    for uf in unicode_files {
+        sanitize_debugfs_path(&uf.original_path)?;
+        if !uf.temp_name.is_empty() {
+            sanitize_debugfs_path(&uf.temp_name)?;
+        }
+    }
 
     // Collect all parent directories that need to be created (sorted for mkdir order)
     let mut dirs_to_create = BTreeSet::new();
@@ -698,17 +723,16 @@ fn fix_unicode_names_in_ext4(
     }
     commands.push_str("rmdir /__uc\n");
 
-    // Write commands to a temp file to avoid pipe buffer deadlocks
-    let cmd_file = std::env::temp_dir().join(format!(
-        "boxlite-debugfs-unicode-{}.txt",
-        std::process::id()
-    ));
-    std::fs::write(&cmd_file, commands.as_bytes()).map_err(|e| {
+    // Write commands to a secure temp file to avoid pipe buffer deadlocks
+    // and predictable temp file paths (symlink attack vector)
+    let mut cmd_file = tempfile::NamedTempFile::new().map_err(|e| {
         BoxliteError::Storage(format!(
-            "Failed to write debugfs unicode command file {}: {}",
-            cmd_file.display(),
+            "Failed to create temp file for debugfs unicode commands: {}",
             e
         ))
+    })?;
+    std::io::Write::write_all(&mut cmd_file, commands.as_bytes()).map_err(|e| {
+        BoxliteError::Storage(format!("Failed to write debugfs unicode commands: {}", e))
     })?;
 
     let debugfs = crate::disk::ext4::get_debugfs_path()?;
@@ -716,7 +740,7 @@ fn fix_unicode_names_in_ext4(
     let output = std::process::Command::new(&debugfs)
         .arg("-w")
         .arg("-f")
-        .arg(&cmd_file)
+        .arg(cmd_file.path())
         .arg(image_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -728,8 +752,7 @@ fn fix_unicode_names_in_ext4(
             ))
         })?;
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&cmd_file);
+    // NamedTempFile cleans up on drop
 
     let duration = start.elapsed();
 
@@ -762,9 +785,13 @@ fn create_symlinks_in_ext4(
     image_path: &std::path::Path,
     symlinks: &[DeferredSymlink],
 ) -> BoxliteResult<()> {
-    use std::io::Write;
-
     let start = std::time::Instant::now();
+
+    // Sanitize all paths and targets before building debugfs commands
+    for sym in symlinks {
+        sanitize_debugfs_path(&sym.path)?;
+        sanitize_debugfs_path(&sym.target)?;
+    }
 
     // Build debugfs commands: symlink <path> <target>
     let mut commands = String::new();
@@ -791,17 +818,16 @@ fn create_symlinks_in_ext4(
         commands.push_str(&format!("sif /{} gid 0\n", unix_path));
     }
 
-    // Write commands to a temp file to avoid pipe buffer deadlocks
-    let cmd_file = std::env::temp_dir().join(format!(
-        "boxlite-debugfs-symlinks-{}.txt",
-        std::process::id()
-    ));
-    std::fs::write(&cmd_file, commands.as_bytes()).map_err(|e| {
+    // Write commands to a secure temp file to avoid pipe buffer deadlocks
+    // and predictable temp file paths (symlink attack vector)
+    let mut cmd_file = tempfile::NamedTempFile::new().map_err(|e| {
         BoxliteError::Storage(format!(
-            "Failed to write debugfs command file {}: {}",
-            cmd_file.display(),
+            "Failed to create temp file for debugfs symlink commands: {}",
             e
         ))
+    })?;
+    std::io::Write::write_all(&mut cmd_file, commands.as_bytes()).map_err(|e| {
+        BoxliteError::Storage(format!("Failed to write debugfs symlink commands: {}", e))
     })?;
 
     let debugfs = crate::disk::ext4::get_debugfs_path()?;
@@ -809,15 +835,14 @@ fn create_symlinks_in_ext4(
     let output = std::process::Command::new(&debugfs)
         .arg("-w")
         .arg("-f")
-        .arg(&cmd_file)
+        .arg(cmd_file.path())
         .arg(image_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .output()
         .map_err(|e| BoxliteError::Storage(format!("Failed to run debugfs for symlinks: {}", e)))?;
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&cmd_file);
+    // NamedTempFile cleans up on drop
 
     let duration = start.elapsed();
 
@@ -854,6 +879,11 @@ fn fix_permissions_in_ext4(
 ) -> BoxliteResult<()> {
     let start = std::time::Instant::now();
 
+    // Sanitize all paths before building debugfs commands
+    for perm in permissions {
+        sanitize_debugfs_path(&perm.path)?;
+    }
+
     // Build debugfs commands: sif /<path> mode <octal_mode>
     let mut commands = String::new();
     for perm in permissions {
@@ -861,15 +891,17 @@ fn fix_permissions_in_ext4(
         commands.push_str(&format!("sif /{} mode 0{:o}\n", unix_path, perm.mode));
     }
 
-    // Write commands to a temp file to avoid pipe buffer deadlocks
-    let cmd_file = std::env::temp_dir().join(format!(
-        "boxlite-debugfs-permissions-{}.txt",
-        std::process::id()
-    ));
-    std::fs::write(&cmd_file, commands.as_bytes()).map_err(|e| {
+    // Write commands to a secure temp file to avoid pipe buffer deadlocks
+    // and predictable temp file paths (symlink attack vector)
+    let mut cmd_file = tempfile::NamedTempFile::new().map_err(|e| {
         BoxliteError::Storage(format!(
-            "Failed to write debugfs permission command file {}: {}",
-            cmd_file.display(),
+            "Failed to create temp file for debugfs permission commands: {}",
+            e
+        ))
+    })?;
+    std::io::Write::write_all(&mut cmd_file, commands.as_bytes()).map_err(|e| {
+        BoxliteError::Storage(format!(
+            "Failed to write debugfs permission commands: {}",
             e
         ))
     })?;
@@ -879,7 +911,7 @@ fn fix_permissions_in_ext4(
     let output = std::process::Command::new(&debugfs)
         .arg("-w")
         .arg("-f")
-        .arg(&cmd_file)
+        .arg(cmd_file.path())
         .arg(image_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -888,8 +920,7 @@ fn fix_permissions_in_ext4(
             BoxliteError::Storage(format!("Failed to run debugfs for permissions: {}", e))
         })?;
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&cmd_file);
+    // NamedTempFile cleans up on drop
 
     let duration = start.elapsed();
 
@@ -1376,5 +1407,45 @@ mod tests {
         assert!(permissions.iter().any(|p| p.path == "etc/normal.conf"));
         // Non-ASCII files should also have permissions recorded
         assert!(permissions.iter().any(|p| p.path.contains("F\u{0151}tan")));
+    }
+
+    #[test]
+    fn test_sanitize_debugfs_path_accepts_normal_paths() {
+        assert_eq!(
+            sanitize_debugfs_path("usr/share/ca-certificates/cert.crt").unwrap(),
+            "usr/share/ca-certificates/cert.crt"
+        );
+        assert_eq!(sanitize_debugfs_path("bin/busybox").unwrap(), "bin/busybox");
+        // Non-ASCII is fine (UTF-8 filenames are valid)
+        assert_eq!(
+            sanitize_debugfs_path("usr/share/caf\u{00e9}/file.txt").unwrap(),
+            "usr/share/caf\u{00e9}/file.txt"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_debugfs_path_rejects_newlines() {
+        let result = sanitize_debugfs_path("usr/bin/evil\nrmdir /");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unsafe characters"));
+    }
+
+    #[test]
+    fn test_sanitize_debugfs_path_rejects_carriage_return() {
+        let result = sanitize_debugfs_path("usr/bin/evil\rrmdir /");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sanitize_debugfs_path_rejects_null_bytes() {
+        let result = sanitize_debugfs_path("usr/bin/evil\0file");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sanitize_debugfs_path_rejects_double_quotes() {
+        let result = sanitize_debugfs_path("usr/bin/evil\"file");
+        assert!(result.is_err());
     }
 }
