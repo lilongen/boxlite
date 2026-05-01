@@ -325,18 +325,15 @@ impl Vmm for Krun {
             let mut ctx = KrunContext::create()?;
 
             let cpus = config.cpus.unwrap_or(4);
-            // Windows WHPX: cap at 2 vCPUs.
+            // Windows WHPX: cap at 8 vCPUs.
             //
-            // Root cause: With 4+ vCPUs, all threads contend the single
-            // DeviceManager mutex for LAPIC MMIO reads (esp. timer CCR at 0x390).
-            // During SMP timer calibration, the kernel busy-loops reading CCR
-            // on all vCPUs simultaneously. The BSP starves on tick_and_poll()
-            // and block I/O completions, causing a hang (constant RIP, blk_qn=0).
-            //
-            // Fix direction: per-vCPU LAPIC locks to eliminate cross-vCPU
-            // contention on MMIO reads. Deferred until 4+ vCPU demand materializes.
+            // Per-vCPU LAPIC locking eliminates cross-vCPU contention on LAPIC
+            // MMIO reads. Each vCPU's LAPIC is wrapped in its own Arc<Mutex<>>,
+            // and a fast path in the runner bypasses the DeviceManager lock for
+            // LAPIC reads/writes. This allows 4+ vCPUs to run SMP timer
+            // calibration without starving BSP's tick_and_poll().
             #[cfg(not(unix))]
-            let cpus = cpus.clamp(1, 2);
+            let cpus = cpus.clamp(1, 8);
             tracing::debug!("Setting VM config: {} CPUs, 4096MB memory", cpus);
             ctx.set_vm_config(cpus, config.memory_mib.unwrap_or(4096))?;
 
