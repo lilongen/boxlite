@@ -325,14 +325,14 @@ impl Vmm for Krun {
             let mut ctx = KrunContext::create()?;
 
             let cpus = config.cpus.unwrap_or(4);
-            // Windows WHPX: cap at 2 vCPUs.
+            // Windows WHPX: cap at 4 vCPUs.
             //
-            // 4+ vCPUs causes BSP hang during early boot (console.log = 0 bytes,
-            // kernel never prints). CPUID leaf 0xB/0x1F topology is now correct,
-            // but the hang persists — root cause is elsewhere (possibly AP boot
-            // timing, LAPIC timer calibration, or WHPX multi-vCPU scheduling).
+            // Previously capped at 2 due to BSP hang at 4+ vCPUs. Root cause:
+            // timer thread was calling WHvCancelRunVirtualProcessor on non-running
+            // APs (still waiting on condvar), corrupting WHPX partition state.
+            // Fixed by adding vcpu_running flags — timer only cancels running vCPUs.
             #[cfg(not(unix))]
-            let cpus = cpus.clamp(1, 2);
+            let cpus = cpus.clamp(1, 4);
             tracing::debug!("Setting VM config: {} CPUs, 4096MB memory", cpus);
             ctx.set_vm_config(cpus, config.memory_mib.unwrap_or(4096))?;
 
