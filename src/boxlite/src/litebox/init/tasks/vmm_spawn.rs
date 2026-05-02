@@ -135,20 +135,12 @@ async fn build_config(
     Vec<ContainerMount>,
     Transport,
 )> {
-    // Transport setup: Unix sockets on Unix, TCP ports on Windows
-    #[cfg(unix)]
+    // Transport setup: Unix sockets on all platforms
+    // On Windows, AF_UNIX is supported since Windows 10 1809+ via uds_windows crate
     let (transport, ready_transport) = (
         Transport::unix(layout.socket_path()),
         Transport::unix(layout.ready_socket_path()),
     );
-    #[cfg(not(unix))]
-    let (transport, ready_transport) = {
-        let ports = crate::net::port::allocate_box_ports()?;
-        (
-            Transport::tcp(ports.grpc_port),
-            Transport::tcp(ports.ready_port),
-        )
-    };
 
     let user_volumes = resolve_user_volumes(&options.volumes)?;
 

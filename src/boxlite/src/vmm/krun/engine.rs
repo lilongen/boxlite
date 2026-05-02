@@ -391,36 +391,31 @@ impl Vmm for Krun {
                             ))
                         })?;
 
-                        // Configure virtio-net feature flags
-                        use crate::vmm::krun::constants::network_features::*;
-                        let features = NET_FEATURE_CSUM
-                            | NET_FEATURE_GUEST_CSUM
-                            | NET_FEATURE_GUEST_TSO4
-                            | NET_FEATURE_GUEST_UFO
-                            | NET_FEATURE_HOST_TSO4
-                            | NET_FEATURE_HOST_UFO;
+                        // On Windows, use krun_add_net (the only supported net FFI).
+                        // On Unix, use krun_add_net_unixstream/unixgram with feature flags.
+                        #[cfg(windows)]
+                        {
+                            ctx.add_net(socket_path_str, mac_address)?;
+                        }
+                        #[cfg(unix)]
+                        {
+                            use crate::vmm::krun::constants::network_features::*;
+                            let features = NET_FEATURE_CSUM
+                                | NET_FEATURE_GUEST_CSUM
+                                | NET_FEATURE_GUEST_TSO4
+                                | NET_FEATURE_GUEST_UFO
+                                | NET_FEATURE_HOST_TSO4
+                                | NET_FEATURE_HOST_UFO;
 
-                        // Pass the socket path to libkrun (not FD)
-                        // libkrun will connect and send the VFKit magic handshake if needed
-                        ctx.add_net_path(
-                            socket_path_str,
-                            features,
-                            *connection_type,
-                            *mac_address,
-                        )?;
+                            ctx.add_net_path(
+                                socket_path_str,
+                                features,
+                                *connection_type,
+                                *mac_address,
+                            )?;
+                        }
 
                         tracing::debug!("Successfully configured Unix socket net");
-                    }
-
-                    #[cfg(not(unix))]
-                    crate::net::NetworkBackendEndpoint::TcpSocket { addr, mac_address } => {
-                        tracing::info!(
-                            addr = %addr,
-                            mac_address = ?mac_address,
-                            "Configuring TCP socket net (Windows)"
-                        );
-                        ctx.add_net(&addr.to_string(), mac_address)?;
-                        tracing::debug!("Successfully configured TCP socket net");
                     }
                 }
             } else if config.disable_network {
@@ -540,67 +535,43 @@ impl Vmm for Krun {
             Self::set_entrypoint(&config, &mut ctx)?;
 
             // Configure gRPC communication channel
-            // On Unix: socket bridged to vsock (listen=true: libkrun creates socket)
-            // On Windows: TCP port (handled by WHPX vsock emulation)
-            match &config.transport {
-                boxlite_shared::Transport::Unix { socket_path } => {
-                    let grpc_socket_path = socket_path
-                        .to_str()
-                        .ok_or_else(|| BoxliteError::Engine("invalid gRPC socket path".into()))?;
-                    tracing::debug!(
-                        socket_path = grpc_socket_path,
-                        guest_port = network::GUEST_AGENT_PORT,
-                        "Configuring vsock bridge for gRPC"
-                    );
-                    ctx.add_vsock_port(network::GUEST_AGENT_PORT, grpc_socket_path, true)?;
-                }
-                boxlite_shared::Transport::Tcp { port } => {
-                    // On Windows, vsock ports are exposed as TCP
-                    tracing::debug!(
-                        port,
-                        guest_port = network::GUEST_AGENT_PORT,
-                        "Configuring TCP bridge for gRPC (Windows)"
-                    );
-                    let addr = format!("127.0.0.1:{}", port);
-                    ctx.add_vsock_port(network::GUEST_AGENT_PORT, &addr, true)?;
-                }
+            // Socket bridged to vsock (listen=true: libkrun creates socket)
+            // On all platforms: AF_UNIX socket path
+            let grpc_socket_path = match &config.transport {
+                boxlite_shared::Transport::Unix { socket_path } => socket_path
+                    .to_str()
+                    .ok_or_else(|| BoxliteError::Engine("invalid gRPC socket path".into()))?,
                 _ => {
                     return Err(BoxliteError::Engine(
-                        "gRPC transport must be Unix socket or TCP".into(),
+                        "gRPC transport must be Unix socket".into(),
                     ));
                 }
-            }
+            };
+            tracing::debug!(
+                socket_path = grpc_socket_path,
+                guest_port = network::GUEST_AGENT_PORT,
+                "Configuring vsock bridge for gRPC"
+            );
+            ctx.add_vsock_port(network::GUEST_AGENT_PORT, grpc_socket_path, true)?;
 
             // Configure ready notification channel
-            // On Unix: socket bridged to vsock (listen=false: host listens)
-            // On Windows: TCP port
-            match &config.ready_transport {
-                boxlite_shared::Transport::Unix { socket_path } => {
-                    let ready_socket_path = socket_path
-                        .to_str()
-                        .ok_or_else(|| BoxliteError::Engine("invalid ready socket path".into()))?;
-                    tracing::debug!(
-                        socket_path = ready_socket_path,
-                        guest_port = network::GUEST_READY_PORT,
-                        "Configuring vsock bridge for ready notification"
-                    );
-                    ctx.add_vsock_port(network::GUEST_READY_PORT, ready_socket_path, false)?;
-                }
-                boxlite_shared::Transport::Tcp { port } => {
-                    tracing::debug!(
-                        port,
-                        guest_port = network::GUEST_READY_PORT,
-                        "Configuring TCP bridge for ready notification (Windows)"
-                    );
-                    let addr = format!("127.0.0.1:{}", port);
-                    ctx.add_vsock_port(network::GUEST_READY_PORT, &addr, false)?;
-                }
+            // Socket bridged to vsock (listen=false: host listens)
+            let ready_socket_path = match &config.ready_transport {
+                boxlite_shared::Transport::Unix { socket_path } => socket_path
+                    .to_str()
+                    .ok_or_else(|| BoxliteError::Engine("invalid ready socket path".into()))?,
                 _ => {
                     return Err(BoxliteError::Engine(
-                        "ready transport must be Unix socket or TCP".into(),
+                        "ready transport must be Unix socket".into(),
                     ));
                 }
-            }
+            };
+            tracing::debug!(
+                socket_path = ready_socket_path,
+                guest_port = network::GUEST_READY_PORT,
+                "Configuring vsock bridge for ready notification"
+            );
+            ctx.add_vsock_port(network::GUEST_READY_PORT, ready_socket_path, false)?;
 
             // Configure console output redirection if specified
             if let Some(console_path) = &config.console_output {

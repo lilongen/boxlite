@@ -113,7 +113,7 @@ impl PipelineTask<InitCtx> for GuestConnectTask {
 /// 2. Shim process exits unexpectedly (fast failure with diagnostic)
 /// 3. 30s timeout expires (slow failure fallback)
 ///
-/// Supports both Unix socket (Unix) and TCP (Windows) ready transports.
+/// Uses AF_UNIX sockets on all platforms (including Windows via uds_windows).
 async fn wait_for_guest_ready(
     ready_transport: &Transport,
     shim_pid: Option<u32>,
@@ -123,7 +123,6 @@ async fn wait_for_guest_ready(
     box_id: &str,
 ) -> BoxliteResult<()> {
     match ready_transport {
-        #[cfg(unix)]
         Transport::Unix { socket_path } => {
             wait_for_guest_ready_unix(
                 socket_path,
@@ -135,17 +134,13 @@ async fn wait_for_guest_ready(
             )
             .await
         }
-        Transport::Tcp { port } => {
-            wait_for_guest_ready_tcp(*port, shim_pid, exit_file, console_log, stderr_file, box_id)
-                .await
-        }
         _ => Err(BoxliteError::Engine(
-            "ready transport must be Unix socket or TCP".into(),
+            "ready transport must be Unix socket".into(),
         )),
     }
 }
 
-/// Unix socket ready listener.
+/// Unix socket ready listener (all platforms).
 #[cfg(unix)]
 async fn wait_for_guest_ready_unix(
     socket_path: &Path,
@@ -184,27 +179,39 @@ async fn wait_for_guest_ready_unix(
     .await
 }
 
-/// TCP ready listener.
-async fn wait_for_guest_ready_tcp(
-    port: u16,
+/// Unix socket ready listener (Windows via uds_windows).
+#[cfg(windows)]
+async fn wait_for_guest_ready_unix(
+    socket_path: &Path,
     shim_pid: Option<u32>,
     exit_file: &Path,
     console_log: &Path,
     stderr_file: &Path,
     box_id: &str,
 ) -> BoxliteResult<()> {
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-        BoxliteError::Engine(format!("Failed to bind ready listener on {}: {}", addr, e))
-    })?;
+    // Remove stale socket if exists
+    if socket_path.exists() {
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    let path = socket_path.to_path_buf();
 
     tracing::debug!(
-        addr = %addr,
-        "Listening for guest ready notification (TCP)"
+        socket = %socket_path.display(),
+        "Listening for guest ready notification (Windows AF_UNIX)"
     );
 
+    // Use uds_windows in a blocking task for the accept
+    let accept_path = path.clone();
     race_ready_signal(
-        async { listener.accept().await.map(|_| ()) },
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let listener = uds_windows::UnixListener::bind(&accept_path)?;
+                listener.accept().map(|_| ())
+            })
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        },
         shim_pid,
         exit_file,
         console_log,
@@ -364,88 +371,9 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("ready transport must be Unix socket or TCP"),
+            err.contains("ready transport must be Unix socket"),
             "Unexpected error: {}",
             err
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // TCP ready signal tests (cross-platform)
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// Guest connects via TCP → success.
-    #[tokio::test]
-    async fn test_guest_ready_tcp_success() {
-        let dir = tempfile::tempdir().unwrap();
-        let exit_file = dir.path().join("exit");
-        let console_log = dir.path().join("console.log");
-        let stderr_file = dir.path().join("shim.stderr");
-
-        // Bind to port 0 to discover a free port, then drop the listener
-        // so wait_for_guest_ready_tcp can rebind it.
-        let discovery = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = discovery.local_addr().unwrap().port();
-        drop(discovery);
-
-        let transport = Transport::tcp(port);
-
-        // Spawn a connector that will connect after a short delay
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await;
-        });
-
-        let result = wait_for_guest_ready(
-            &transport,
-            None,
-            &exit_file,
-            &console_log,
-            &stderr_file,
-            "test-box",
-        )
-        .await;
-        assert!(result.is_ok(), "Expected success, got: {:?}", result);
-    }
-
-    /// TCP ready with no connector → timeout.
-    #[tokio::test]
-    async fn test_guest_ready_tcp_timeout() {
-        let dir = tempfile::tempdir().unwrap();
-        let exit_file = dir.path().join("exit");
-        let console_log = dir.path().join("console.log");
-        let stderr_file = dir.path().join("shim.stderr");
-
-        // Bind to port 0 to discover a free port, then drop so we can rebind
-        let discovery = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = discovery.local_addr().unwrap().port();
-        drop(discovery);
-
-        // Use a short timeout by calling race_ready_signal directly
-        let addr = format!("127.0.0.1:{}", port);
-        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-
-        let start = std::time::Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_millis(200),
-            race_ready_signal(
-                async { listener.accept().await.map(|_| ()) },
-                None,
-                &exit_file,
-                &console_log,
-                &stderr_file,
-                "test-box",
-            ),
-        )
-        .await;
-        let elapsed = start.elapsed();
-
-        // The outer timeout fires (200ms), not the inner 30s timeout
-        assert!(result.is_err(), "Should timeout with no connector");
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "Should timeout quickly, took {:?}",
-            elapsed
         );
     }
 

@@ -263,11 +263,11 @@ pub struct InitPipelineContext {
     /// MITM CA cert PEM (set by vmm_spawn, read by guest_init for Container.Init gRPC).
     pub ca_cert_pem: Option<String>,
     /// Main gRPC transport (set by vmm_spawn, read by guest_connect).
-    /// On Unix: `Transport::Unix`, on Windows: `Transport::Tcp`.
+    /// `Transport::Unix` on all platforms (AF_UNIX).
     /// Falls back to `config.transport` when `None` (reattach flow).
     pub transport: Option<Transport>,
     /// Ready transport (set by vmm_spawn, read by guest_connect).
-    /// On Unix: `Transport::Unix`, on Windows: `Transport::Tcp`.
+    /// `Transport::Unix` on all platforms (AF_UNIX).
     pub ready_transport: Option<Transport>,
 
     #[cfg(target_os = "linux")]

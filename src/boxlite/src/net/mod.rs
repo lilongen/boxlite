@@ -12,8 +12,6 @@ use std::path::PathBuf;
 
 pub(crate) mod ca;
 pub mod constants;
-#[cfg(not(unix))]
-pub mod port;
 pub mod socket_path;
 
 #[cfg(feature = "libslirp")]
@@ -42,14 +40,6 @@ pub enum NetworkBackendEndpoint {
         connection_type: ConnectionType,
         /// MAC address for the guest network interface
         /// This must match the DHCP static lease configured in the network backend
-        mac_address: [u8; 6],
-    },
-
-    /// TCP socket for network backend (Windows).
-    /// Used when Unix domain sockets are not available.
-    #[cfg(not(unix))]
-    TcpSocket {
-        addr: std::net::SocketAddr,
         mac_address: [u8; 6],
     },
 }
