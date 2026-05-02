@@ -327,13 +327,10 @@ impl Vmm for Krun {
             let cpus = config.cpus.unwrap_or(4);
             // Windows WHPX: cap at 2 vCPUs.
             //
-            // Per-vCPU LAPIC locking eliminates cross-vCPU contention on LAPIC
-            // MMIO reads, but BSP's tick_and_poll() still contends on the
-            // DeviceManager lock for block I/O completions. With 4+ vCPUs all
-            // doing SMP timer calibration, BSP gets starved intermittently,
-            // causing boot hangs (~50% failure rate on Win11 T14 i5-1135G7).
-            // The per-LAPIC locking infrastructure is in place for future
-            // improvements (e.g., lock-free I/O completion queue).
+            // 4+ vCPUs causes BSP hang during early boot (console.log = 0 bytes,
+            // kernel never prints). CPUID leaf 0xB/0x1F topology is now correct,
+            // but the hang persists — root cause is elsewhere (possibly AP boot
+            // timing, LAPIC timer calibration, or WHPX multi-vCPU scheduling).
             #[cfg(not(unix))]
             let cpus = cpus.clamp(1, 2);
             tracing::debug!("Setting VM config: {} CPUs, 4096MB memory", cpus);
