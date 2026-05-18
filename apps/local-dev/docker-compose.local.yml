@@ -1,0 +1,54 @@
+# Local-dev infra for verifying the alpine:3.22.4 fix without touching cloud.
+# - postgres: real DB so we can run TypeORM migrations and observe row state
+# - redis:    real Redis (NestJS RedisLockProvider needs SELECT support)
+# - mock-runner: stub HTTP server that satisfies the runner-api-client contract
+#               so snapshot.manager can drive PENDING -> PULLING -> ACTIVE
+#
+# Bring up:  docker compose -f apps/local-dev/docker-compose.local.yml up -d
+# Tear down: docker compose -f apps/local-dev/docker-compose.local.yml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: boxlite-local-pg
+    environment:
+      POSTGRES_USER: boxlite
+      POSTGRES_PASSWORD: boxlite
+      POSTGRES_DB: boxlite
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U boxlite -d boxlite"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    container_name: boxlite-local-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  mock-runner:
+    image: node:24-alpine
+    container_name: boxlite-local-mock-runner
+    working_dir: /app
+    volumes:
+      - ./mock-runner:/app
+    command: ["node", "server.mjs"]
+    environment:
+      PORT: "3003"
+    ports:
+      - "3003:3003"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "wget -q -O /dev/null http://localhost:3003/info || exit 1"
+      interval: 2s
+      timeout: 2s
+      retries: 15
