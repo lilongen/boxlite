@@ -35,7 +35,9 @@ services:
       retries: 15
 
   mock-runner:
-    image: node:24-alpine
+    # Pinned to node:22-alpine to match the project's CI matrix
+    # (.github/workflows/config.yml builds against Node 18/20/22).
+    image: node:22-alpine
     container_name: boxlite-local-mock-runner
     working_dir: /app
     volumes:
