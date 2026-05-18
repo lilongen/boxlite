@@ -1,52 +1,225 @@
-# Local-dev infra for verifying the alpine:3.22.4 fix without touching cloud.
-# - postgres: real DB so we can run TypeORM migrations and observe row state
-# - redis:    real Redis (NestJS RedisLockProvider needs SELECT support)
-# - mock-runner: stub HTTP server that satisfies the runner-api-client contract
-#               so snapshot.manager can drive PENDING -> PULLING -> ACTIVE
+# BoxLite control plane — local development on macOS (M-series).
 #
-# Bring up:  docker compose -f apps/local-dev/docker-compose.local.yml up -d
-# Tear down: docker compose -f apps/local-dev/docker-compose.local.yml down -v
+# Stack:
+#   postgres + redis        — state + locks
+#   dex                     — OIDC IdP (localhost:5556)
+#   minio + minio-init      — S3-compatible storage + bucket bootstrap
+#   registry                — Docker Distribution v2, plays the role of the
+#                             cloud snapshot-manager for local dev
+#   api                     — NestJS control plane (localhost:3000)
+#   snapshot-manager        — Go service that fronts the registry in cloud;
+#                             included under `profiles: [full]` for parity.
+#   proxy / ssh-gateway     — sandbox HTTP-preview + SSH (localhost:4000/2222);
+#                             also `profiles: [full]`.
+#   mock-runner             — stub runner; replaced by host-native runner
+#                             once that's built.
+#
+# Bring up (minimal):  docker compose -f apps/local-dev/docker-compose.local.yml up -d
+# Full stack:          docker compose -f apps/local-dev/docker-compose.local.yml --profile full up -d
+# Tear down:           docker compose -f apps/local-dev/docker-compose.local.yml down -v
+#
+# All services share the `boxlite-local` bridge network so they resolve each
+# other via service-name DNS. Ports are also published to host localhost for
+# browser / curl access.
+
+name: boxlite-local
+
+x-build-context: &build-context
+  context: ../..
 
 services:
+  # ─── State ────────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: boxlite-local-pg
     environment:
-      POSTGRES_USER: boxlite
-      POSTGRES_PASSWORD: boxlite
-      POSTGRES_DB: boxlite
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${DB_USERNAME:-boxlite}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-boxlite}
+      POSTGRES_DB: ${DB_DATABASE:-boxlite}
+    ports: ["5432:5432"]
+    volumes: ["pg-data:/var/lib/postgresql/data"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U boxlite -d boxlite"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-boxlite} -d ${DB_DATABASE:-boxlite}"]
       interval: 2s
       timeout: 2s
-      retries: 15
+      retries: 30
 
   redis:
     image: redis:7-alpine
     container_name: boxlite-local-redis
-    ports:
-      - "6379:6379"
+    ports: ["6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
       timeout: 2s
-      retries: 15
+      retries: 30
 
+  # ─── Identity (Dex OIDC) ──────────────────────────────────────────────────
+  dex:
+    build:
+      <<: *build-context
+      dockerfile: apps/dex/Dockerfile
+    container_name: boxlite-local-dex
+    environment:
+      DEX_ISSUER: ${PUBLIC_OIDC_DOMAIN:-http://localhost:5556/dex}
+      REDIRECT_URI: ${DASHBOARD_URL:-http://localhost:5173}
+    ports: ["5556:5556"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:5556/dex/.well-known/openid-configuration || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ─── S3-compatible storage ────────────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    container_name: boxlite-local-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-boxlite-local}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-boxlite-local-secret}
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # MinIO Console UI
+    volumes: ["minio-data:/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/ready || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-05T11-29-45Z
+    container_name: boxlite-local-minio-init
+    depends_on:
+      minio: { condition: service_healthy }
+    environment:
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-boxlite-local}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-boxlite-local-secret}
+      S3_DEFAULT_BUCKET: ${S3_DEFAULT_BUCKET:-boxlite-sandbox-files}
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["sh /init.sh"]
+    volumes:
+      - ./minio/init.sh:/init.sh:ro
+    restart: "no"
+
+  # ─── Docker Registry (plays the role of snapshot-manager in dev) ──────────
+  registry:
+    image: registry:2
+    container_name: boxlite-local-registry
+    environment:
+      REGISTRY_HTTP_ADDR: 0.0.0.0:5000
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    ports: ["5050:5000"]  # 5000 clashes with macOS AirPlay Receiver; publish on 5050
+    volumes: ["registry-data:/var/lib/registry"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:5000/v2/ || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ─── Application services ─────────────────────────────────────────────────
+  # The API is OPT-IN (profile: api). Recommended dev workflow runs the API
+  # on the host via `yarn nx serve api` for hot-reload + faster iteration.
+  # Including it here as a container is for parity with the cloud build path.
+  #
+  # Known issue: a production build via `yarn nx build api` currently fails
+  # with ~35 TS2322 strict-mode errors in audit/req.headers code on upstream
+  # main (independent of this branch). Until those are fixed, prefer the
+  # host workflow. See README.
+  api:
+    build:
+      <<: *build-context
+      dockerfile: apps/api/Dockerfile
+      args:
+        CACHE_BUST: "${CACHE_BUST:-1}"
+    container_name: boxlite-local-api
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      dex: { condition: service_healthy }
+      registry: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+    env_file: [.env]
+    ports: ["3000:3000"]
+    extra_hosts:
+      # The cloud injects DEFAULT_RUNNER_API_URL pointing at the runner EC2's
+      # private IP. Locally the native runner lives on the Mac host; this lets
+      # the api container reach it via `host.docker.internal:3003`. Harmless if
+      # only the mock-runner is up — the API just dials the mock instead.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/config || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    profiles: [api]
+
+  snapshot-manager:
+    build:
+      <<: *build-context
+      dockerfile: apps/snapshot-manager/Dockerfile
+    container_name: boxlite-local-snapshot-manager
+    environment:
+      SNAPSHOT_MANAGER_STORAGE_DRIVER: filesystem
+      SNAPSHOT_MANAGER_STORAGE_FILESYSTEM_ROOTDIRECTORY: /var/lib/snapshot-manager
+      SNAPSHOT_MANAGER_STORAGE_DELETE_ENABLED: "true"
+      SNAPSHOT_MANAGER_AUTH_TYPE: none
+    ports: ["5001:5000"]
+    volumes: ["snapshot-manager-data:/var/lib/snapshot-manager"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5000/healthz || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    profiles: [full]  # opt-in; the API talks directly to `registry` by default
+
+  proxy:
+    build:
+      <<: *build-context
+      dockerfile: apps/proxy/Dockerfile
+    container_name: boxlite-local-proxy
+    depends_on:
+      api: { condition: service_healthy }
+    environment:
+      PORT: "4000"
+      BOXLITE_API_URL: http://api:3000/api
+      PROXY_API_KEY: ${PROXY_API_KEY:-local-dev-proxy-key}
+    ports: ["4000:4000"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4000/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    profiles: [full]
+
+  ssh-gateway:
+    build:
+      <<: *build-context
+      dockerfile: apps/ssh-gateway/Dockerfile
+    container_name: boxlite-local-ssh-gateway
+    depends_on:
+      api: { condition: service_healthy }
+    environment:
+      API_URL: http://api:3000
+      API_KEY: ${SSH_GATEWAY_API_KEY:-local-dev-ssh-gateway-key}
+    ports: ["2222:2222"]
+    profiles: [full]
+
+  # ─── Mock runner (default; replaced by host-native runner for real VMs) ───
   mock-runner:
     # Pinned to node:22-alpine to match the project's CI matrix
     # (.github/workflows/config.yml builds against Node 18/20/22).
     image: node:22-alpine
     container_name: boxlite-local-mock-runner
     working_dir: /app
-    volumes:
-      - ./mock-runner:/app
+    volumes: ["./mock-runner:/app"]
     command: ["node", "server.mjs"]
     environment:
       PORT: "3003"
-    ports:
-      - "3003:3003"
+    ports: ["3003:3003"]
     healthcheck:
       test:
         - "CMD-SHELL"
@@ -54,3 +227,9 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+
+volumes:
+  pg-data:
+  minio-data:
+  registry-data:
+  snapshot-manager-data:
