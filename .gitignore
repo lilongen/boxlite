@@ -176,3 +176,10 @@ Cargo.lock
 /runner
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+# ============================================================================
+# Local dev artifacts (apps/infra-local + dashboard E2E session)
+# ============================================================================
+.playwright-mcp/
+dashboard-*.png
+dex-*.png
