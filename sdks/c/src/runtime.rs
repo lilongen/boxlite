@@ -665,6 +665,108 @@ pub extern "C" fn version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
 }
 
+// ============================================================================
+// SYNCHRONOUS IMPORT — added for scale-down sidecar replacement (2026-05-22).
+//
+// Counterpart to `boxlite_box_export`. Imports a `.boxlite` archive into the
+// runtime; the imported box is in the Stopped state and must be Started by
+// the caller. Used by apps/runner during cold migration to re-create a box
+// on the destination runner using the same `sandbox.id`.
+// ============================================================================
+
+/// Import a `.boxlite` archive synchronously and return a handle to the new box.
+///
+/// * `archive_path` — NUL-terminated UTF-8 path to a `.boxlite` archive on disk.
+/// * `name` — optional NUL-terminated UTF-8 box name. NULL = leave unnamed.
+/// * `id` — optional NUL-terminated UTF-8 box id. NULL = mint a fresh id.
+///   When provided, the imported box uses this id verbatim (must pass
+///   `BoxID::parse` validation: URL-safe, ≤128 chars).
+/// * `out_handle` — receives the new `CBoxHandle*` on success.
+///
+/// # Safety
+/// All pointer arguments must be valid as documented. `out_handle` must be
+/// non-NULL. The caller takes ownership of the returned handle and MUST free it
+/// with `boxlite_box_free` (or transfer ownership downstream).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn boxlite_runtime_import_box(
+    runtime: *mut CBoxliteRuntime,
+    archive_path: *const c_char,
+    name: *const c_char,
+    id: *const c_char,
+    out_handle: *mut *mut crate::CBoxHandle,
+    out_error: *mut CBoxliteError,
+) -> BoxliteErrorCode {
+    unsafe {
+        if runtime.is_null() {
+            write_error(out_error, null_pointer_error("runtime"));
+            return BoxliteErrorCode::InvalidArgument;
+        }
+        if out_handle.is_null() {
+            write_error(out_error, null_pointer_error("out_handle"));
+            return BoxliteErrorCode::InvalidArgument;
+        }
+        let archive = match c_str_to_string(archive_path) {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(out_error, e);
+                return BoxliteErrorCode::InvalidArgument;
+            }
+        };
+        let name_opt = if name.is_null() {
+            None
+        } else {
+            match c_str_to_string(name) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    write_error(out_error, e);
+                    return BoxliteErrorCode::InvalidArgument;
+                }
+            }
+        };
+        let id_opt = if id.is_null() {
+            None
+        } else {
+            match c_str_to_string(id) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    write_error(out_error, e);
+                    return BoxliteErrorCode::InvalidArgument;
+                }
+            }
+        };
+
+        let runtime_ref = &*runtime;
+        let runtime_clone = runtime_ref.runtime.clone();
+        let tokio_rt = runtime_ref.tokio_rt.clone();
+        let queue = runtime_ref.queue.clone();
+        let task_tokio_rt = tokio_rt.clone();
+
+        let archive_handle = boxlite::BoxArchive::new(archive);
+        let result = tokio_rt.block_on(async move {
+            runtime_clone.import_box(archive_handle, name_opt, id_opt).await
+        });
+
+        match result {
+            Ok(lite) => {
+                let box_id = lite.id().clone();
+                let boxed = Box::new(crate::box_handle::BoxHandle {
+                    handle: Arc::new(lite),
+                    box_id,
+                    tokio_rt: task_tokio_rt,
+                    queue,
+                });
+                *out_handle = Box::into_raw(boxed) as *mut crate::CBoxHandle;
+                BoxliteErrorCode::Ok
+            }
+            Err(e) => {
+                let code = error_to_code(&e);
+                write_error(out_error, e);
+                code
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

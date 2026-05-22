@@ -356,3 +356,61 @@ unsafe fn box_free(handle: *mut BoxHandle) {
         }
     }
 }
+
+// ============================================================================
+// SYNCHRONOUS EXPORT — added for scale-down sidecar replacement (2026-05-22).
+//
+// Unlike the async post-and-drain ops above, export is a blocking one-shot:
+// the caller (Go runner during a backup) wants the archive on disk before
+// returning. Avoiding the event-queue plumbing keeps the diff tiny and the
+// behavior identical to `boxlite cli` export from a user's perspective.
+// ============================================================================
+
+/// Export a stopped box to a portable `.boxlite` archive on disk.
+///
+/// Blocks until the archive is written. Caller MUST stop the box first
+/// (export refuses to operate on a running VM to avoid corrupt disks).
+///
+/// # Safety
+/// * `handle` must be a valid `BoxHandle*` returned by `boxlite_get` /
+///   `boxlite_create_box`.
+/// * `dest_path` must be a NUL-terminated UTF-8 C string.
+/// * `out_error` must be NULL or a valid `CBoxliteError*` writable by the caller.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn boxlite_box_export(
+    handle: *mut CBoxHandle,
+    dest_path: *const c_char,
+    out_error: *mut CBoxliteError,
+) -> BoxliteErrorCode {
+    unsafe {
+        if handle.is_null() {
+            write_error(out_error, null_pointer_error("handle"));
+            return BoxliteErrorCode::InvalidArgument;
+        }
+        let dest = match c_str_to_string(dest_path) {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(out_error, e);
+                return BoxliteErrorCode::InvalidArgument;
+            }
+        };
+
+        let handle_ref = &*handle;
+        let lite = handle_ref.handle.clone();
+        let tokio_rt = handle_ref.tokio_rt.clone();
+        let path = std::path::PathBuf::from(dest);
+
+        let result = tokio_rt.block_on(async move {
+            lite.export(boxlite::ExportOptions::default(), &path).await
+        });
+
+        match result {
+            Ok(_archive) => BoxliteErrorCode::Ok,
+            Err(e) => {
+                let code = crate::error::error_to_code(&e);
+                write_error(out_error, e);
+                code
+            }
+        }
+    }
+}
