@@ -72,6 +72,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         email: email || '',
         emailVerified: payload.email_verified || false,
         personalOrganizationQuota: this.configService.getOrThrow('defaultOrganizationQuota'),
+        // Anchor the auto-created Personal organization to the platform's
+        // default region. Without this, the OnAsyncEvent listener
+        // OrganizationService.handleUserCreatedEvent creates the org with
+        // defaultRegionId=undefined, and downstream code that assumes
+        // organization.defaultRegionId is set silently fails — leaving
+        // the new user with no Personal org and the dashboard with
+        // "Cannot read properties of undefined (reading 'id')".
+        personalOrganizationDefaultRegionId: this.configService.getOrThrow('defaultRegion.id'),
       })
       this.logger.debug(`Created new user with ID: ${userId}`)
     } else if (user.name === 'Unknown' || !user.email) {
