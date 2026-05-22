@@ -150,7 +150,17 @@ func (c *Client) Close() error {
 
 // Create creates a new sandbox (VM) from the given image and configuration.
 // Returns the box ID and daemon version.
+//
+// Special case: if `sandboxDto.Snapshot` is a backup reference (the apps/api
+// `backupSnapshot` field, shape `<registry>/<project>/backup-<id>:<ts>` or
+// `s3://<bucket>/<key>`), this dispatches to createFromBackupArchive which
+// restores the box from a `.boxlite` archive in S3 via the local sidecar.
+// This is the migration path used by docs/runner-scaling/scale-down-design.md.
 func (c *Client) Create(ctx context.Context, sandboxDto dto.CreateSandboxDTO) (string, string, error) {
+	if isBackupRef(sandboxDto.Snapshot) {
+		return c.createFromBackupArchive(ctx, sandboxDto)
+	}
+
 	// API sends cores / GB / GB as small integers (see apps/api Sandbox entity).
 	cpus := int(sandboxDto.CpuQuota)
 	if cpus < 1 {

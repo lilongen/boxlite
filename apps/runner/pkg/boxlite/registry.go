@@ -47,7 +47,24 @@ func (c *Client) PullSnapshot(ctx context.Context, req dto.PullSnapshotRequestDT
 }
 
 // InspectImageInRegistry inspects an image in a remote registry.
+//
+// Backup-archive short-circuit: apps/api's pre-restore guard
+// (sandbox-start.action.ts) calls this to assert the backup exists before
+// invoking createSandbox. With our sidecar path the archive lives in S3,
+// not the Docker registry, so we synthesize an OK response for `backup-*`
+// refs and let createFromBackupArchive do the real S3 HEAD+GET.
+//
+// The synthesized digest must be non-empty (apps/api errors on empty) and
+// stable per snapshot ref (so cache logic doesn't churn).
 func (c *Client) InspectImageInRegistry(ctx context.Context, imageName string, registry *dto.RegistryDTO) (*ImageDigest, error) {
+	if isBackupRef(imageName) {
+		digest, size, err := c.inspectBackupArchiveInS3(ctx, imageName)
+		if err != nil {
+			return nil, fmt.Errorf("backup-archive inspect for %s: %w", imageName, err)
+		}
+		return &ImageDigest{Digest: digest, Size: size}, nil
+	}
+
 	desc, err := c.getRegistryDescriptor(ctx, imageName, registry)
 	if err != nil {
 		return nil, err
