@@ -1,10 +1,11 @@
 go 1.25.4
 
 use (
-	./runner
-	./daemon
-	./common-go
-	./api-client-go
-	./libs/computer-use
 	../sdks/go
+	./api-client-go
+	./common-go
+	./daemon
+	./libs/computer-use
+	./proxy
+	./runner
 )
