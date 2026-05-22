@@ -16,10 +16,11 @@
 //          shared region; capture runner apiKey.
 //   [2/10] Cordon: PATCH /admin/runners/:id/scheduling unschedulable=true.
 //   [3/10] Enumerate sandboxes via runner.apiKey (GET /sandbox/for-runner).
-//   [4/10] Force backup of STARTED sandboxes (POST /sandbox/:id/backup +
-//          poll backupState=COMPLETED).
-//   [5/10] Stop STARTED sandboxes (POST /sandbox/:id/stop +
-//          poll state=STOPPED).
+//   [4/10] Stop STARTED sandboxes (POST /sandbox/:id/stop +
+//          poll state=STOPPED). Stop FIRST so [5] backs up the post-stop disk.
+//   [5/10] Force backup of (now-STOPPED) sandboxes (POST /sandbox/:id/backup
+//          + poll backupState=COMPLETED). Runner CreateBackup is side-effect-
+//          free w.r.t. box state — it never stops the box itself.
 //   [6/10] Archive all (now-STOPPED) sandboxes (POST /sandbox/:id/archive +
 //          poll state=ARCHIVED, runnerId=null).
 //   [7/10] Restart sandboxes that were originally STARTED (POST /sandbox/:id/
@@ -423,7 +424,7 @@ interface Args {
 function parseArgs(): Args {
   const p = new Command();
   p.name("scale-down-runner")
-    .description("Safely scale down a SHARED runner: cordon → backup → stop → archive → migrate → delete row → terminate EC2")
+    .description("Safely scale down a SHARED runner: cordon → stop → backup → archive → migrate → delete row → terminate EC2")
     .requiredOption("--id <uuid>", "Runner UUID to scale down")
     .option("--admin-token <token>", "ADMIN bearer (or env BOXLITE_ADMIN_API_KEY)")
     .option("--api-url <url>", "API URL (or env BOXLITE_API_URL)")
@@ -539,7 +540,7 @@ async function main(): Promise<number> {
     if (!args.yes) {
       const ok = await confirmTty(
         `\nAbout to scale-down runner ${src.name} (${src.id}):\n` +
-          `  - cordon, backup, stop, archive all sandboxes on this runner\n` +
+          `  - cordon, stop, backup, archive all sandboxes on this runner\n` +
           `  - restart originally-STARTED sandboxes (they migrate to peers)\n` +
           `  - DELETE runner DB row\n` +
           `  - ${args.skipEc2Terminate ? "(skip)" : "TERMINATE"} EC2(s) tagged RunnerId=${src.id}\n` +
@@ -599,10 +600,43 @@ async function main(): Promise<number> {
       process.stderr.write(`       (no sandboxes to migrate)\n`);
     }
 
-    // ─── [4/10] Force backup STARTED sandboxes ──────────────────────────
+    // ─── [4/10] Stop STARTED sandboxes ──────────────────────────────────
+    //
+    // Order rationale: runner CreateBackup is side-effect-free w.r.t. box state
+    // (it does NOT stop the box — see apps/runner/pkg/boxlite/stubs.go). For a
+    // scale-down we WANT the box stopped before backup so the archive captures
+    // the final post-stop state and the subsequent archive stage doesn't need
+    // to wait for a "first-stop-then-backup" race.
     if (started.length > 0) {
-      process.stderr.write(`[4/10] Ensure backup COMPLETED for ${started.length} STARTED sandbox(es)…\n`);
+      process.stderr.write(`[4/10] Stop ${started.length} STARTED sandbox(es)…\n`);
       for (const sb of started) {
+        process.stderr.write(`       stop ${sb.id}…\n`);
+        try {
+          await stopSandbox(api, sb.id);
+          await waitSandboxState(api, sb.id, "stopped", args.maxWaitStop);
+          process.stderr.write(`         ✓ STOPPED\n`);
+        } catch (e: unknown) {
+          const msg = (e as Error)?.message ?? String(e);
+          process.stderr.write(`         FAIL: ${msg}\n`);
+          result.fail(`stop ${sb.id}: ${msg}`);
+          result.flush();
+          return EXIT.MIGRATION_FAILED;
+        }
+      }
+    } else {
+      process.stderr.write(`[4/10] No STARTED sandboxes; skip stop stage.\n`);
+    }
+
+    // ─── [5/10] Force backup (now-STOPPED) sandboxes ────────────────────
+    //
+    // Triggers a fresh backup so the .boxlite archive reflects the post-stop
+    // disk state. Note: the originally-STOPPED sandboxes are also backed up
+    // here because they may have stale lastBackupAt; doing this proactively
+    // ensures a consistent restore artifact for stage [7/10].
+    const toBackup = [...started, ...stopped];
+    if (toBackup.length > 0) {
+      process.stderr.write(`[5/10] Ensure backup COMPLETED for ${toBackup.length} sandbox(es)…\n`);
+      for (const sb of toBackup) {
         process.stderr.write(`       ${sb.id} (${sb.name})…\n`);
         try {
           const status = await triggerBackupSmart(api, sb.id);
@@ -634,26 +668,7 @@ async function main(): Promise<number> {
         }
       }
     } else {
-      process.stderr.write(`[4/10] No STARTED sandboxes; skip backup stage.\n`);
-    }
-
-    // ─── [5/10] Stop STARTED ────────────────────────────────────────────
-    if (started.length > 0) {
-      process.stderr.write(`[5/10] Stop ${started.length} STARTED sandbox(es)…\n`);
-      for (const sb of started) {
-        process.stderr.write(`       stop ${sb.id}…\n`);
-        try {
-          await stopSandbox(api, sb.id);
-          await waitSandboxState(api, sb.id, "stopped", args.maxWaitStop);
-          process.stderr.write(`         ✓ STOPPED\n`);
-        } catch (e: unknown) {
-          const msg = (e as Error)?.message ?? String(e);
-          process.stderr.write(`         WARN: ${msg}\n`);
-          result.fail(`stop ${sb.id}: ${msg}`);
-        }
-      }
-    } else {
-      process.stderr.write(`[5/10] No STARTED sandboxes; skip stop stage.\n`);
+      process.stderr.write(`[5/10] No sandboxes to back up.\n`);
     }
 
     // ─── [6/10] Archive all (now-STOPPED) ───────────────────────────────

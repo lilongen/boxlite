@@ -120,8 +120,21 @@ func (c *Client) RecoverSandbox(ctx context.Context, sandboxId string, recoverDt
 // for why the sidecar can't coexist with the runner's runtime (BoxliteRuntime
 // holds an exclusive lock on BOXLITE_HOME).
 //
-// Triggered by apps/api when an operator runs a scale-down. The matching restore
-// path is in Client.Create → createFromBackupArchive.
+// **Side-effect-free w.r.t. box state**: this function does NOT stop or pause
+// the box from the caller's perspective. The Rust-side `LiteBox::export`
+// internally uses `with_quiesce_async` (brief VM pause during disk flatten,
+// resumed automatically), so a running box stays running and a stopped box
+// stays stopped. The caller decides the box lifecycle:
+//   - apps/api ad-hoc-backup-check cron (5-min periodic backup): box continues
+//     running normally after backup completes — no user-visible interruption.
+//   - scale-down-runner.ts: explicit POST /sandbox/:id/stop BEFORE the
+//     POST /sandbox/:id/backup, because the scale-down stage chain
+//     (stop → backup → archive) needs the box stopped for the subsequent
+//     archive stage anyway.
+//
+// Triggered by apps/api when an operator runs a scale-down OR when the
+// ad-hoc cron fires. The matching restore path is in Client.Create →
+// createFromBackupArchive.
 func (c *Client) CreateBackup(ctx context.Context, sandboxId string, backupDto dto.CreateBackupDTO) error {
 	bucket := os.Getenv("BOXLITE_BACKUPS_BUCKET")
 	if bucket == "" {
@@ -133,21 +146,6 @@ func (c *Client) CreateBackup(ctx context.Context, sandboxId string, backupDto d
 	bx, err := c.getOrFetchBox(ctx, sandboxId)
 	if err != nil {
 		return fmt.Errorf("backup: get box: %w", err)
-	}
-
-	// Quiesce the box so export sees a consistent filesystem. Tolerate
-	// "already stopped" since the API path may have stopped us already.
-	if err := bx.Stop(ctx); err != nil {
-		c.logger.WarnContext(ctx, "backup: stop returned error (may already be stopped)", "sandbox", sandboxId, "error", err)
-	}
-
-	// Re-fetch after stop: the box handle may have been invalidated.
-	c.mu.Lock()
-	delete(c.boxes, sandboxId)
-	c.mu.Unlock()
-	bx, err = c.getOrFetchBox(ctx, sandboxId)
-	if err != nil {
-		return fmt.Errorf("backup: re-fetch box after stop: %w", err)
 	}
 
 	// Export to a temp file (the Rust archive writer needs a file, not a stream).
