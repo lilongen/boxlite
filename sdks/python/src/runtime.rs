@@ -206,17 +206,20 @@ impl PyBoxlite {
     ///
     /// Returns a Box handle for the imported box.
     /// If `name` is omitted, the imported box remains unnamed.
-    #[pyo3(signature = (archive_path, name=None))]
+    /// If `id` is set, the imported box uses that id verbatim instead of
+    /// minting a fresh one (subject to BoxID validation).
+    #[pyo3(signature = (archive_path, name=None, id=None))]
     fn import_box<'py>(
         &self,
         py: Python<'py>,
         archive_path: String,
         name: Option<String>,
+        id: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let runtime = Arc::clone(&self.runtime);
         let archive = BoxArchive::new(archive_path);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let handle = runtime.import_box(archive, name).await.map_err(map_err)?;
+            let handle = runtime.import_box(archive, name, id).await.map_err(map_err)?;
             Ok(PyBox {
                 handle: Arc::new(handle),
             })

@@ -123,6 +123,7 @@ impl RuntimeBackend for RestRuntime {
         &self,
         archive: BoxArchive,
         name: Option<String>,
+        id: Option<String>,
     ) -> BoxliteResult<LiteBox> {
         self.client.require_import_enabled().await?;
 
@@ -134,10 +135,13 @@ impl RuntimeBackend for RestRuntime {
             ))
         })?;
 
-        let query: Vec<(&str, &str)> = name
-            .as_deref()
-            .map(|n| vec![("name", n)])
-            .unwrap_or_default();
+        let mut query: Vec<(&str, &str)> = Vec::new();
+        if let Some(n) = name.as_deref() {
+            query.push(("name", n));
+        }
+        if let Some(i) = id.as_deref() {
+            query.push(("id", i));
+        }
 
         let resp: BoxResponse = self
             .client

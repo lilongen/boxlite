@@ -98,11 +98,19 @@ impl JsBoxlite {
     }
 
     /// Import a box from a `.boxlite` archive.
+    ///
+    /// If `id` is set, the imported box uses that id verbatim instead of
+    /// minting a fresh one (subject to BoxID validation).
     #[napi(js_name = "importBox")]
-    pub async fn import_box(&self, archive_path: String, name: Option<String>) -> Result<JsBox> {
+    pub async fn import_box(
+        &self,
+        archive_path: String,
+        name: Option<String>,
+        id: Option<String>,
+    ) -> Result<JsBox> {
         let runtime = Arc::clone(&self.runtime);
         let archive = BoxArchive::new(archive_path);
-        let handle = runtime.import_box(archive, name).await.map_err(map_err)?;
+        let handle = runtime.import_box(archive, name, id).await.map_err(map_err)?;
         Ok(JsBox {
             handle: Arc::new(handle),
         })

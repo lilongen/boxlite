@@ -100,7 +100,7 @@ async fn test_export_import_roundtrip() {
     assert!(archive.path().extension().is_some_and(|e| e == "boxlite"));
 
     let imported = runtime
-        .import_box(archive, Some("imported-box".to_string()))
+        .import_box(archive, Some("imported-box".to_string()), None)
         .await
         .expect("Failed to import box");
 
@@ -143,7 +143,7 @@ async fn test_export_import_preserves_box_options() {
         .await
         .expect("export");
 
-    let imported = runtime.import_box(archive, None).await.expect("import");
+    let imported = runtime.import_box(archive, None, None).await.expect("import");
 
     let imported_info = imported.info();
     assert_eq!(imported_info.status, BoxStatus::Stopped);
@@ -233,7 +233,7 @@ async fn test_export_running_box() {
 
     // Archived box can be imported and started
     let imported = runtime
-        .import_box(archive, Some("imported-running".to_string()))
+        .import_box(archive, Some("imported-running".to_string()), None)
         .await
         .expect("Import should succeed");
     assert_eq!(imported.info().status, BoxStatus::Stopped);
@@ -275,7 +275,7 @@ async fn test_export_import_running_box_roundtrip() {
 
     // Import and verify the marker file is preserved
     let imported = runtime
-        .import_box(archive, Some("imported-roundtrip".to_string()))
+        .import_box(archive, Some("imported-roundtrip".to_string()), None)
         .await
         .expect("Import should succeed");
 
@@ -446,7 +446,7 @@ async fn test_export_under_write_pressure() {
 
     // Import the archive and verify the filesystem is intact (bootable)
     let imported = runtime
-        .import_box(archive, Some("imported-stress".to_string()))
+        .import_box(archive, Some("imported-stress".to_string()), None)
         .await
         .expect("Import should succeed");
 
