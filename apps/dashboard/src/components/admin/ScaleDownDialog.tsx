@@ -38,7 +38,7 @@ export const ScaleDownDialog: React.FC<ScaleDownDialogProps> = ({ runner, open, 
   const submit = async () => {
     if (!runner) return
     try {
-      const res = await apiClient.axiosInstance.post(`/api/admin/runner-ops/${runner.id}/scale-down`, { restartStopped })
+      const res = await apiClient.axiosInstance.post(`/admin/runner-ops/${runner.id}/scale-down`, { restartStopped })
       setJobId(res.data.id)
     } catch (e: any) {
       toast.error(`Failed to start: ${e?.response?.data?.message ?? e?.message ?? 'unknown'}`)

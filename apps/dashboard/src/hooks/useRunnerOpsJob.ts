@@ -64,7 +64,7 @@ export function useRunnerOpsJob(jobId: string | null): UseRunnerOpsJobState {
       try {
         // Use the apiClient's axiosInstance to make authenticated requests
         const axiosInstance = apiClient.axiosInstance
-        const res = await axiosInstance.get(`/api/admin/runner-ops/jobs/${jobId}`)
+        const res = await axiosInstance.get(`/admin/runner-ops/jobs/${jobId}`)
 
         if (cancelled.current) return
 

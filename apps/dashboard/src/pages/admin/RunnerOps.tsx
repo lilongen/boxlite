@@ -21,7 +21,7 @@ const RunnerOps: React.FC = () => {
   const fetchRunners = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await apiClient.axiosInstance.get('/api/admin/runner-ops/shared')
+      const res = await apiClient.axiosInstance.get('/admin/runner-ops/shared')
       setRunners(res.data?.runners ?? [])
     } catch (e) {
       handleApiError(e, 'Failed to load runners')

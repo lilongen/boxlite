@@ -48,7 +48,7 @@ export const AddSharedRunnerDialog: React.FC<AddSharedRunnerDialogProps> = ({ on
         regionId: regionId || undefined,
         instanceType: instanceType || undefined,
       }
-      const res = await apiClient.axiosInstance.post('/api/admin/runner-ops/add-shared', body)
+      const res = await apiClient.axiosInstance.post('/admin/runner-ops/add-shared', body)
       setJobId(res.data.id)
       toast.info('Add runner started')
     } catch (e: any) {
