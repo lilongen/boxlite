@@ -6,9 +6,15 @@
 
 import { Injectable, Logger, ConflictException } from '@nestjs/common'
 import { ulid } from 'ulid'
-import { addSharedRunner } from '../../../../infra/lib/add-shared-runner-lib'
-import { scaleDownRunner } from '../../../../infra/lib/scale-down-runner-lib'
-import type { AddSharedRunnerOpts, ScaleDownOpts, ProgressEvent } from '../../../../infra/lib/runner-ops-types'
+import { addSharedRunner } from '../../../../infra/lib/add-shared-runner-lib.js'
+import { scaleDownRunner } from '../../../../infra/lib/scale-down-runner-lib.js'
+import type {
+  AddSharedRunnerOpts,
+  AddSharedRunnerResult,
+  ScaleDownOpts,
+  ScaleDownResult,
+  ProgressEvent,
+} from '../../../../infra/lib/runner-ops-types.js'
 import { TypedConfigService } from '../../config/typed-config.service'
 import { RunnerOpsJobStore } from './runner-ops-job-store'
 
@@ -111,11 +117,15 @@ export class RunnerOpsService {
   }
 
   // Injection seam for unit tests
-  protected runAddSharedRunner(opts: AddSharedRunnerOpts) {
+  protected runAddSharedRunner(
+    opts: AddSharedRunnerOpts,
+  ): AsyncGenerator<ProgressEvent, AddSharedRunnerResult, void> {
     return addSharedRunner(opts)
   }
 
-  protected runScaleDownRunner(opts: ScaleDownOpts) {
+  protected runScaleDownRunner(
+    opts: ScaleDownOpts,
+  ): AsyncGenerator<ProgressEvent, ScaleDownResult, void> {
     return scaleDownRunner(opts)
   }
 
@@ -129,7 +139,7 @@ export class RunnerOpsService {
           await this.store.complete(id, next.value)
           break
         }
-        await this.applyEvent(id, next.value, (s) => {
+        await this.applyEvent(id, next.value as ProgressEvent, (s) => {
           currentStage = s
         })
       }
@@ -152,7 +162,7 @@ export class RunnerOpsService {
           await this.store.complete(id, next.value)
           break
         }
-        await this.applyEvent(id, next.value, (s) => {
+        await this.applyEvent(id, next.value as ProgressEvent, (s) => {
           currentStage = s
         })
       }

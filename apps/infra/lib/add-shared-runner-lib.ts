@@ -13,9 +13,9 @@ import type {
   AddSharedRunnerOpts,
   AddSharedRunnerResult,
   ProgressEvent,
-} from './runner-ops-types'
-import { OperationAbortedError } from './runner-ops-types'
-import { buildRunnerUserData } from './runner-user-data'
+} from './runner-ops-types.js'
+import { OperationAbortedError } from './runner-ops-types.js'
+import { buildRunnerUserData } from './runner-user-data.js'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 

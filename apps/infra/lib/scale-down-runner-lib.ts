@@ -10,8 +10,8 @@ import type {
   ProgressEvent,
   ScaleDownOpts,
   ScaleDownResult,
-} from './runner-ops-types'
-import { OperationAbortedError } from './runner-ops-types'
+} from './runner-ops-types.js'
+import { OperationAbortedError } from './runner-ops-types.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
