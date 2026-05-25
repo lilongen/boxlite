@@ -39,11 +39,7 @@ import * as readline from "readline";
 import { fileURLToPath } from "url";
 
 import { Command } from "commander";
-import {
-  EC2Client,
-  DescribeInstancesCommand,
-  TerminateInstancesCommand,
-} from "@aws-sdk/client-ec2";
+import { scaleDownRunner } from "../lib/scale-down-runner-lib";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AWS_REGION = process.env.AWS_REGION ?? "ap-southeast-1";
@@ -60,7 +56,7 @@ export const EXIT = {
   MIGRATION_FAILED: 8,
 } as const;
 
-// ─── HTTP ────────────────────────────────────────────────────────────────────
+// ─── API helpers for preflight ────────────────────────────────────────────────
 
 interface ApiClient {
   baseUrl: string;
@@ -73,12 +69,22 @@ class ApiError extends Error {
   }
 }
 
+interface RunnerDto {
+  id: string;
+  name: string;
+  state: string;
+  region: string;
+  regionType?: string;
+  unschedulable: boolean;
+  apiKey: string;
+  currentStartedSandboxes: number;
+}
+
 async function apiFetch<T>(
   api: ApiClient,
   method: "GET" | "POST" | "PATCH" | "DELETE",
   apiPath: string,
   body?: unknown,
-  extraHeaders: Record<string, string> = {},
 ): Promise<T> {
   const url = `${api.baseUrl.replace(/\/$/, "")}${apiPath}`;
   const res = await fetch(url, {
@@ -87,7 +93,6 @@ async function apiFetch<T>(
       Authorization: `Bearer ${api.token}`,
       "Content-Type": "application/json",
       Accept: "application/json",
-      ...extraHeaders,
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
@@ -101,200 +106,12 @@ async function apiFetch<T>(
   }
 }
 
-// ─── REST shapes ──────────────────────────────────────────────────────────────
-
-interface RunnerDto {
-  id: string;
-  name: string;
-  state: "initializing" | "ready" | "disabled" | "decommissioned" | "unresponsive";
-  region: string;
-  regionType?: "shared" | "dedicated" | "custom";
-  unschedulable: boolean;
-  apiKey: string;
-  currentStartedSandboxes: number;
-}
-
-interface SandboxDto {
-  id: string;
-  name: string;
-  state: string;
-  desiredState?: string;
-  runnerId?: string;
-  region?: string;
-  snapshot?: string;
-  backupState?: string;
-  backupSnapshot?: string;
-}
-
-// ─── Runner ops ──────────────────────────────────────────────────────────────
-
 async function getRunner(api: ApiClient, id: string): Promise<RunnerDto> {
   return apiFetch<RunnerDto>(api, "GET", `/api/admin/runners/${id}`);
 }
 
 async function listRunners(api: ApiClient): Promise<RunnerDto[]> {
   return apiFetch<RunnerDto[]>(api, "GET", `/api/admin/runners`);
-}
-
-async function setScheduling(api: ApiClient, id: string, unschedulable: boolean): Promise<void> {
-  await apiFetch<unknown>(api, "PATCH", `/api/admin/runners/${id}/scheduling`, { unschedulable });
-}
-
-// ─── Sandbox ops ─────────────────────────────────────────────────────────────
-
-async function listSandboxesOnRunner(api: ApiClient, runnerApiKey: string): Promise<SandboxDto[]> {
-  // GET /api/sandbox/for-runner uses RunnerAuthGuard → must auth with runner's own apiKey.
-  const url = `${api.baseUrl.replace(/\/$/, "")}/api/sandbox/for-runner`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${runnerApiKey}` },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text(), "GET", "/api/sandbox/for-runner");
-  return (await res.json()) as SandboxDto[];
-}
-
-async function getSandbox(api: ApiClient, id: string): Promise<SandboxDto> {
-  return apiFetch<SandboxDto>(api, "GET", `/api/sandbox/${id}`);
-}
-
-// Triggers a backup if not already in progress. Returns:
-//   - "triggered" if we POSTed and got 200
-//   - "already-in-progress" if the API rejected with 400 "already in progress"
-//   - "already-complete" if backupState is already COMPLETED (caller may skip)
-async function triggerBackupSmart(
-  api: ApiClient,
-  id: string,
-): Promise<"triggered" | "already-in-progress" | "already-complete" | "skipped"> {
-  const s = await getSandbox(api, id);
-  const bs = (s.backupState ?? "").toLowerCase();
-  // If a fresh backup is already complete and lastBackupAt is recent, skip
-  if (bs === "completed") return "already-complete";
-  // If currently in flight, don't re-trigger
-  if (bs === "pending" || bs === "in_progress" || bs === "inprogress") return "already-in-progress";
-  // Otherwise trigger
-  try {
-    await apiFetch<unknown>(api, "POST", `/api/sandbox/${id}/backup`, {});
-    return "triggered";
-  } catch (e) {
-    // Race: cron triggered between our get + post
-    if (e instanceof ApiError && e.status === 400 && /already in progress/i.test(e.body)) {
-      return "already-in-progress";
-    }
-    throw e;
-  }
-}
-
-async function stopSandbox(api: ApiClient, id: string): Promise<void> {
-  await apiFetch<unknown>(api, "POST", `/api/sandbox/${id}/stop`, {});
-}
-
-async function archiveSandbox(api: ApiClient, id: string): Promise<void> {
-  await apiFetch<unknown>(api, "POST", `/api/sandbox/${id}/archive`, {});
-}
-
-async function startSandbox(api: ApiClient, id: string): Promise<void> {
-  await apiFetch<unknown>(api, "POST", `/api/sandbox/${id}/start`, {});
-}
-
-// ─── Polling helpers ─────────────────────────────────────────────────────────
-
-async function waitFor<T>(
-  desc: string,
-  fn: () => Promise<T | null>,
-  timeoutSec: number,
-  intervalMs = 3000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutSec * 1000;
-  let last: T | null = null;
-  while (Date.now() < deadline) {
-    last = await fn();
-    if (last !== null) return last;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error(`Timeout waiting for ${desc} (${timeoutSec}s). Last value: ${JSON.stringify(last)}`);
-}
-
-async function waitBackupCompleted(
-  api: ApiClient,
-  sid: string,
-  timeoutSec: number,
-): Promise<"completed" | "error"> {
-  const result = await waitFor<{ s: SandboxDto; outcome: "completed" | "error" }>(
-    `backup of ${sid} to COMPLETED`,
-    async () => {
-      const s = await getSandbox(api, sid);
-      const bs = (s.backupState ?? "").toLowerCase();
-      if (bs === "completed") return { s, outcome: "completed" };
-      if (bs === "error") return { s, outcome: "error" };
-      return null;
-    },
-    timeoutSec,
-  );
-  return result.outcome;
-}
-
-// Wait until sandbox.state is ARCHIVED AND runnerId is null (the latter is the
-// signal that the runner-side destroy actually completed and ran archive.action's
-// final updateSandboxState(..., null) at sandbox-archive.action.ts:101/123).
-async function waitArchivedAndDetached(
-  api: ApiClient,
-  sid: string,
-  timeoutSec: number,
-): Promise<SandboxDto> {
-  return waitFor<SandboxDto>(
-    `sandbox ${sid} state=archived AND runnerId=null`,
-    async () => {
-      const s = await getSandbox(api, sid);
-      if (s.state === "archived" && !s.runnerId) return s;
-      if (s.state === "error" || s.state === "build_failed") {
-        throw new Error(`Sandbox ${sid} entered terminal state ${s.state} during archive.`);
-      }
-      return null;
-    },
-    timeoutSec,
-  );
-}
-
-async function waitSandboxState(
-  api: ApiClient,
-  sid: string,
-  desired: string | string[],
-  timeoutSec: number,
-): Promise<SandboxDto> {
-  const want = Array.isArray(desired) ? desired : [desired];
-  const terminalBad = ["error", "build_failed"];
-  return waitFor<SandboxDto>(
-    `sandbox ${sid} state ∈ {${want.join(",")}}`,
-    async () => {
-      const s = await getSandbox(api, sid);
-      if (want.includes(s.state)) return s;
-      if (terminalBad.includes(s.state) && !want.includes(s.state)) {
-        throw new Error(`Sandbox ${sid} entered terminal state ${s.state}.`);
-      }
-      return null;
-    },
-    timeoutSec,
-  );
-}
-
-// ─── EC2 ─────────────────────────────────────────────────────────────────────
-
-async function findEc2ByRunnerId(awsRegion: string, runnerId: string): Promise<string[]> {
-  const ec2 = new EC2Client({ region: awsRegion });
-  const r = await ec2.send(
-    new DescribeInstancesCommand({
-      Filters: [
-        { Name: "tag:RunnerId", Values: [runnerId] },
-        { Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped"] },
-      ],
-    }),
-  );
-  return (r.Reservations ?? []).flatMap((r) => r.Instances ?? []).map((i) => i.InstanceId!).filter(Boolean);
-}
-
-async function terminateEc2(awsRegion: string, instanceIds: string[]): Promise<void> {
-  if (!instanceIds.length) return;
-  const ec2 = new EC2Client({ region: awsRegion });
-  await ec2.send(new TerminateInstancesCommand({ InstanceIds: instanceIds }));
 }
 
 // ─── Result file ─────────────────────────────────────────────────────────────
@@ -343,6 +160,12 @@ interface ResultFile {
   };
   errors: string[];
   next_steps: string;
+}
+
+interface SandboxDto {
+  id: string;
+  name: string;
+  state: string;
 }
 
 class ResultWriter {
@@ -433,13 +256,9 @@ function parseArgs(): Args {
     .option("--result-file <path>", "Output JSON", "./scale-down-runner-result.json")
     .option("--no-require-peer", "Don't require ≥1 peer (only --strategy stop-and-archive equivalent)")
     .option("--restart-stopped", "Also restart originally-STOPPED sandboxes after archive (default: false)")
-    // Sidecar export+S3 upload of a multi-GB archive can run minutes; bumped to 900s
-    // from the previous 600s default to absorb slow MinIO/S3 PUTs over the dev VPC link.
     .option("--max-wait-backup <s>", "Per-sandbox timeout for backup", (v) => parseInt(v, 10), 900)
     .option("--max-wait-stop <s>", "Per-sandbox timeout for stop", (v) => parseInt(v, 10), 120)
     .option("--max-wait-archive <s>", "Per-sandbox timeout for archive", (v) => parseInt(v, 10), 300)
-    // Restore-from-archive includes S3 GET + sidecar import + box start; 900s is the
-    // matching ceiling for the backup path.
     .option("--max-wait-start <s>", "Per-sandbox timeout for start-on-new-runner", (v) => parseInt(v, 10), 900)
     .option("--max-wait-drain <s>", "Stage [8/10] total timeout", (v) => parseInt(v, 10), 900)
     .option("--skip-ec2-terminate", "Don't terminate EC2 (keep for inspection)")
@@ -494,7 +313,7 @@ async function main(): Promise<number> {
   let result: ResultWriter | null = null;
 
   try {
-    // ─── [1/10] Preflight ────────────────────────────────────────────────
+    // Quick preflight outside generator to gather info for confirmation
     process.stderr.write(`[1/10] Preflight…\n`);
     const src = await getRunner(api, args.id);
 
@@ -507,7 +326,6 @@ async function main(): Promise<number> {
     }
     process.stderr.write(`       ✓ source: ${src.name} (${src.id})  region=${src.region} (shared)\n`);
 
-    // Peer pool: same shared region, ready, schedulable, not the source
     const all = await listRunners(api);
     const peers = all.filter(
       (r) =>
@@ -552,266 +370,76 @@ async function main(): Promise<number> {
       }
     }
 
-    // ─── [2/10] Cordon ──────────────────────────────────────────────────
-    process.stderr.write(`[2/10] Cordon source runner…\n`);
-    await setScheduling(api, src.id, true);
-    result.setCordoned();
-    result.flush();
+    // Run the generator for stages 2-10
+    const gen = scaleDownRunner({
+      apiUrl: args.apiUrl,
+      adminToken: args.adminToken,
+      awsRegion: args.awsRegion,
+      runnerId: args.id,
+      restartStopped: args.restartStopped,
+      skipEc2Terminate: args.skipEc2Terminate,
+      dryRun: false, // We already checked dryRun above
+      maxWaitBackupSec: args.maxWaitBackup,
+      maxWaitStopSec: args.maxWaitStop,
+      maxWaitArchiveSec: args.maxWaitArchive,
+      maxWaitStartSec: args.maxWaitStart,
+    });
 
-    // ─── [3/10] Enumerate ───────────────────────────────────────────────
-    process.stderr.write(`[3/10] Enumerate sandboxes on source…\n`);
-    if (!src.apiKey) throw new Error(`Source runner row is missing apiKey; cannot list sandboxes.`);
-    const all_sandboxes = await listSandboxesOnRunner(api, src.apiKey);
-    const TERMINAL = new Set(["archived", "destroyed", "destroying"]);
-    const STARTED_LIKE = new Set(["started"]);
-    const STOPPED_LIKE = new Set(["stopped"]);
+    let genNext = await gen.next();
+    let finalResult: any = null;
 
-    const started: SandboxDto[] = [];
-    const stopped: SandboxDto[] = [];
-    const skipped: SandboxDto[] = [];
-    for (const sb of all_sandboxes) {
-      if (TERMINAL.has(sb.state)) continue;
-      if (STARTED_LIKE.has(sb.state)) started.push(sb);
-      else if (STOPPED_LIKE.has(sb.state)) stopped.push(sb);
-      else skipped.push(sb);
-    }
-    process.stderr.write(
-      `       found: started=${started.length} stopped=${stopped.length} skipped(transient/error)=${skipped.length}\n`,
-    );
-    if (skipped.length > 0) {
-      for (const s of skipped) process.stderr.write(`           SKIP ${s.id} (state=${s.state})\n`);
-    }
-    result.setEnumerated(started, stopped, skipped);
-    result.flush();
+    while (!genNext.done) {
+      const ev = genNext.value as any;
 
-    // Pre-record originals for migration tracking
-    for (const sb of [...started, ...stopped]) {
-      result.pushMigration({
-        id: sb.id,
-        name: sb.name,
-        originalState: sb.state,
-        fromRunnerId: src.id,
-        toRunnerId: null,
-        finalState: "",
-      });
-    }
-
-    if (started.length === 0 && stopped.length === 0) {
-      process.stderr.write(`       (no sandboxes to migrate)\n`);
-    }
-
-    // ─── [4/10] Stop STARTED sandboxes ──────────────────────────────────
-    //
-    // Order rationale: runner CreateBackup is side-effect-free w.r.t. box state
-    // (it does NOT stop the box — see apps/runner/pkg/boxlite/stubs.go). For a
-    // scale-down we WANT the box stopped before backup so the archive captures
-    // the final post-stop state and the subsequent archive stage doesn't need
-    // to wait for a "first-stop-then-backup" race.
-    if (started.length > 0) {
-      process.stderr.write(`[4/10] Stop ${started.length} STARTED sandbox(es)…\n`);
-      for (const sb of started) {
-        process.stderr.write(`       stop ${sb.id}…\n`);
-        try {
-          await stopSandbox(api, sb.id);
-          await waitSandboxState(api, sb.id, "stopped", args.maxWaitStop);
-          process.stderr.write(`         ✓ STOPPED\n`);
-        } catch (e: unknown) {
-          const msg = (e as Error)?.message ?? String(e);
-          process.stderr.write(`         FAIL: ${msg}\n`);
-          result.fail(`stop ${sb.id}: ${msg}`);
+      if (ev.type === "stage") {
+        // Skip stage 1 since we already printed it
+        if (ev.stage > 1) {
+          process.stderr.write(`[${ev.stage}/${ev.total}] ${ev.label}\n`);
+        }
+      } else if (ev.type === "log") {
+        process.stderr.write(`       ${ev.line}\n`);
+      } else if (ev.type === "warning") {
+        process.stderr.write(`WARNING: ${ev.line}\n`);
+      } else if (ev.type === "data") {
+        if (ev.key === "sandboxesStarted") {
+          const started = ev.value as SandboxDto[];
+          result.setEnumerated(started, [], []);
+        } else if (ev.key === "sandboxesStopped") {
+          const stopped = ev.value as SandboxDto[];
+          const current = result["state"]["sandboxes"];
+          result.setEnumerated(current.originalStarted.map((s: any) => ({ id: s.id, name: s.name, state: "started" })), stopped, []);
+        } else if (ev.key === "sandboxesSkipped") {
+          const skipped = ev.value as SandboxDto[];
+          const current = result["state"]["sandboxes"];
+          result.setEnumerated(
+            current.originalStarted.map((s: any) => ({ id: s.id, name: s.name, state: "started" })),
+            current.originalStopped.map((s: any) => ({ id: s.id, name: s.name, state: "stopped" })),
+            skipped,
+          );
           result.flush();
-          return EXIT.MIGRATION_FAILED;
         }
       }
-    } else {
-      process.stderr.write(`[4/10] No STARTED sandboxes; skip stop stage.\n`);
+
+      genNext = await gen.next();
     }
 
-    // ─── [5/10] Force backup (now-STOPPED) sandboxes ────────────────────
-    //
-    // Triggers a fresh backup so the .boxlite archive reflects the post-stop
-    // disk state. Note: the originally-STOPPED sandboxes are also backed up
-    // here because they may have stale lastBackupAt; doing this proactively
-    // ensures a consistent restore artifact for stage [7/10].
-    const toBackup = [...started, ...stopped];
-    if (toBackup.length > 0) {
-      process.stderr.write(`[5/10] Ensure backup COMPLETED for ${toBackup.length} sandbox(es)…\n`);
-      for (const sb of toBackup) {
-        process.stderr.write(`       ${sb.id} (${sb.name})…\n`);
-        try {
-          const status = await triggerBackupSmart(api, sb.id);
-          process.stderr.write(`         status=${status}\n`);
-          if (status === "already-complete") {
-            process.stderr.write(`         ✓ already COMPLETED, skipping\n`);
-            continue;
-          }
-          // Wait for it to settle (either completed, or error which we retry once)
-          let outcome = await waitBackupCompleted(api, sb.id, args.maxWaitBackup);
-          if (outcome === "error") {
-            process.stderr.write(`         backup ended in ERROR; retrying once…\n`);
-            // Retry: another trigger will be treated as "already-in-progress" if API has
-            // not yet cleared state; otherwise it actually re-runs.
-            await triggerBackupSmart(api, sb.id);
-            outcome = await waitBackupCompleted(api, sb.id, args.maxWaitBackup);
-          }
-          if (outcome === "completed") {
-            process.stderr.write(`         ✓ backup COMPLETED\n`);
-          } else {
-            throw new Error(`backup of ${sb.id} ended in ERROR after retry; aborting`);
-          }
-        } catch (e: unknown) {
-          const msg = (e as Error)?.message ?? String(e);
-          process.stderr.write(`         FAIL: ${msg}\n`);
-          result.fail(`backup ${sb.id}: ${msg}`);
-          result.flush();
-          return EXIT.MIGRATION_FAILED;
-        }
-      }
-    } else {
-      process.stderr.write(`[5/10] No sandboxes to back up.\n`);
-    }
+    finalResult = genNext.value as any;
 
-    // ─── [6/10] Archive all (now-STOPPED) ───────────────────────────────
-    const toArchive = [...started, ...stopped];
-    if (toArchive.length > 0) {
-      process.stderr.write(`[6/10] Archive ${toArchive.length} sandbox(es) (wait for runnerId=null)…\n`);
-      for (const sb of toArchive) {
-        process.stderr.write(`       archive ${sb.id}…\n`);
-        try {
-          await archiveSandbox(api, sb.id);
-          const archived = await waitArchivedAndDetached(api, sb.id, args.maxWaitArchive);
-          if (archived.runnerId) {
-            throw new Error(`Sandbox ${sb.id} state=archived but runnerId still set to ${archived.runnerId}.`);
-          }
-          process.stderr.write(`         ✓ ARCHIVED and detached (runnerId=null)\n`);
-        } catch (e: unknown) {
-          const msg = (e as Error)?.message ?? String(e);
-          process.stderr.write(`         FAIL: ${msg}\n`);
-          result.fail(`archive ${sb.id}: ${msg}`);
-          result.flush();
-          return EXIT.MIGRATION_FAILED;
-        }
-      }
+    if (finalResult) {
+      result.setCordoned();
       result.setArchived();
-      result.flush();
-    } else {
-      process.stderr.write(`[6/10] No sandboxes to archive.\n`);
-    }
-
-    // ─── [7/10] Restart (live migrate) ──────────────────────────────────
-    const toRestart = args.restartStopped ? [...started, ...stopped] : started;
-    if (toRestart.length > 0) {
-      process.stderr.write(`[7/10] Restart ${toRestart.length} sandbox(es) on peer runner(s)…\n`);
-      for (const sb of toRestart) {
-        process.stderr.write(`       start ${sb.id}…\n`);
-        try {
-          // Pre-condition: sandbox must currently have runnerId=null. Otherwise
-          // start-action will just resume on the same runner without migration.
-          const pre = await getSandbox(api, sb.id);
-          if (pre.runnerId) {
-            throw new Error(
-              `Pre-start check failed: sandbox ${sb.id} still has runnerId=${pre.runnerId}. Archive stage didn't detach.`,
-            );
-          }
-          await startSandbox(api, sb.id);
-          const restored = await waitSandboxState(api, sb.id, "started", args.maxWaitStart);
-          // Verify boundary
-          if (!restored.runnerId || restored.runnerId === src.id) {
-            throw new Error(
-              `Sandbox ${sb.id} did not move off source (runnerId=${restored.runnerId}).`,
-            );
-          }
-          const dst = all.find((r) => r.id === restored.runnerId);
-          // Fetch fresh, in case dst is one we don't already have
-          const dstRunner = dst ?? (await getRunner(api, restored.runnerId));
-          if (dstRunner.regionType !== "shared") {
-            throw new Error(
-              `Sandbox ${sb.id} restored on non-shared runner (regionType=${dstRunner.regionType}). Boundary violation!`,
-            );
-          }
-          if (dstRunner.region !== src.region) {
-            throw new Error(
-              `Sandbox ${sb.id} crossed regions: ${src.region} → ${dstRunner.region}.`,
-            );
-          }
-          process.stderr.write(`         ✓ STARTED on ${dstRunner.name} (${dstRunner.id.slice(0, 8)})\n`);
-
-          // Update migration record
-          const m = result["state"]["migrations"].find((x: MigratedSandbox) => x.id === sb.id);
-          if (m) {
-            m.toRunnerId = dstRunner.id;
-            m.finalState = "started";
-          }
-        } catch (e: unknown) {
-          const msg = (e as Error)?.message ?? String(e);
-          process.stderr.write(`         WARN: ${msg}\n`);
-          result.fail(`start ${sb.id}: ${msg}`);
-          const m = result["state"]["migrations"].find((x: MigratedSandbox) => x.id === sb.id);
-          if (m) m.finalState = "failed-to-restart";
-        }
-      }
       result.setMigrated();
-      result.flush();
-    } else {
-      process.stderr.write(`[7/10] No sandboxes to restart.\n`);
-    }
-
-    // ─── [8/10] Wait runner drainable ──────────────────────────────────
-    process.stderr.write(`[8/10] Wait until source has 0 non-archived/destroyed sandboxes…\n`);
-    const deadline8 = Date.now() + args.maxWaitDrain * 1000;
-    let drainable = false;
-    while (Date.now() < deadline8) {
-      const fresh = await getRunner(api, src.id);
-      if (fresh.currentStartedSandboxes === 0) {
-        // Double-check via DELETE preflight by trying it; if it returns 412 we keep waiting
-        try {
-          // We don't actually call DELETE here, just verify. Trust the count + the fact that we archived everything.
-          drainable = true;
-          break;
-        } catch {}
-      }
-      await new Promise((r) => setTimeout(r, 5000));
-    }
-    if (!drainable) {
-      process.stderr.write(`       WARN: drain wait timed out; will try DELETE anyway.\n`);
-    }
-    result.setStage("DRAINED");
-    result.flush();
-
-    // ─── [9/10] DELETE runner row ──────────────────────────────────────
-    process.stderr.write(`[9/10] DELETE /api/admin/runners/${src.id}…\n`);
-    try {
-      await apiFetch<unknown>(api, "DELETE", `/api/admin/runners/${src.id}`);
-      process.stderr.write(`       ✓ runner row deleted\n`);
       result.setRowDeleted();
-      result.flush();
-    } catch (e: unknown) {
-      const msg = (e as Error)?.message ?? String(e);
-      process.stderr.write(`       ✗ DELETE failed: ${msg}\n`);
-      result.fail(`DELETE runner: ${msg}`);
-      result.flush();
-      return EXIT.API;
-    }
-
-    // ─── [10/10] Terminate EC2 ─────────────────────────────────────────
-    if (args.skipEc2Terminate) {
-      process.stderr.write(`[10/10] --skip-ec2-terminate: leaving EC2(s) running.\n`);
-    } else {
-      process.stderr.write(`[10/10] Terminate EC2 by tag:RunnerId=${src.id}…\n`);
-      const ec2Ids = await findEc2ByRunnerId(args.awsRegion, src.id);
-      result.setEc2Ids(ec2Ids);
-      if (ec2Ids.length === 0) {
-        process.stderr.write(`       (no matching EC2 found)\n`);
+      if (args.skipEc2Terminate) {
+        result.setStage("EC2_TERMINATED");
       } else {
-        process.stderr.write(`       terminating: ${ec2Ids.join(", ")}\n`);
-        await terminateEc2(args.awsRegion, ec2Ids);
+        result.setEc2Ids(finalResult.ec2InstancesTerminated);
         result.setEc2Terminated();
       }
+      result.setFinished(args.apiUrl);
       result.flush();
     }
 
-    result.setFinished(args.apiUrl);
-    result.flush();
     process.stderr.write(`\nDone. Result file: ${args.resultFile}\n`);
     return EXIT.OK;
   } catch (e: unknown) {
