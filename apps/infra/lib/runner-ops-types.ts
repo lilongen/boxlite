@@ -16,6 +16,7 @@ export interface AddSharedRunnerOpts {
   adminToken: string
   awsRegion: string
   name?: string
+  apiKey?: string
   regionId?: string
   instanceType?: string
   diskGb?: number

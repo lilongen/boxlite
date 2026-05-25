@@ -348,6 +348,7 @@ async function main(): Promise<number> {
       adminToken: args.adminToken,
       awsRegion: AWS_REGION,
       name: runnerName,
+      apiKey: runnerApiKey,
       regionId: args.regionId,
       instanceType: args.instanceType,
       diskGb: args.rootDiskGB,

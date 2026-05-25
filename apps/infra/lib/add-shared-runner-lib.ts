@@ -255,7 +255,7 @@ export async function* addSharedRunner(
   const awsRegion = opts.awsRegion
   const regionId = opts.regionId ?? 'us'
   const runnerName = opts.name ?? defaultName()
-  const runnerApiKey = generateRunnerApiKey()
+  const runnerApiKey = opts.apiKey ?? generateRunnerApiKey()
   const instanceType = opts.instanceType ?? 'c8i.2xlarge'
   const diskGb = opts.diskGb ?? 100
   const registryUrl = opts.registryUrl ?? ''
