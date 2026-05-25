@@ -332,6 +332,14 @@ const configuration = {
   },
   failedSnapshotRunnerRetentionHours: parseInt(process.env.FAILED_SNAPSHOT_RUNNER_RETENTION_HOURS || '3', 10),
   buildInfoSnapshotRunnerStalenessDays: parseInt(process.env.BUILDINFO_SNAPSHOT_RUNNER_STALENESS_DAYS || '7', 10),
+  runnerOps: {
+    apiUrl: process.env.BOXLITE_RUNNER_OPS_API_URL || 'http://localhost:3000',
+    adminToken: process.env.BOXLITE_RUNNER_OPS_ADMIN_TOKEN,
+    awsRegion: process.env.BOXLITE_RUNNER_OPS_AWS_REGION || 'ap-southeast-1',
+    subnetId: process.env.BOXLITE_RUNNER_OPS_SUBNET_ID,
+    instanceProfileName: process.env.BOXLITE_RUNNER_OPS_INSTANCE_PROFILE,
+    registryUrl: process.env.BOXLITE_RUNNER_OPS_REGISTRY_URL,
+  },
 }
 
 export { configuration }
