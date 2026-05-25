@@ -28,13 +28,7 @@ import * as readline from "readline";
 import { fileURLToPath } from "url";
 
 import { Command } from "commander";
-import {
-  EC2Client,
-  RunInstancesCommand,
-  DescribeImagesCommand,
-  DescribeInstancesCommand,
-  type _InstanceType,
-} from "@aws-sdk/client-ec2";
+import { addSharedRunner, RUNNER_NAME_REGEX } from "../lib/add-shared-runner-lib";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "../../..");
@@ -51,72 +45,19 @@ export const EXIT = {
   REFUSED: 6,
 } as const;
 
-// ─── HTTP helpers (admin auth — no X-Organization-Id) ───────────────────────
-
-interface ApiClientOpts {
-  baseUrl: string;
-  token: string;
-}
-
-class ApiError extends Error {
-  constructor(public readonly status: number, public readonly body: string, method: string, path: string) {
-    super(`API ${method} ${path} → ${status}: ${body.slice(0, 500)}`);
-  }
-}
-
-async function apiFetch<T>(
-  opts: ApiClientOpts,
-  method: "GET" | "POST" | "DELETE",
-  apiPath: string,
-  body?: unknown,
-): Promise<T> {
-  const url = `${opts.baseUrl.replace(/\/$/, "")}${apiPath}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${opts.token}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new ApiError(res.status, text, method, apiPath);
-  }
-  if (!text) return undefined as T;
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    throw new Error(`Non-JSON response from ${method} ${apiPath}: ${text.slice(0, 200)}`);
-  }
-}
-
-// ─── REST data shapes (subset, just what we read) ───────────────────────────
-
-interface CreateRunnerResponseDto {
-  id: string;
-  name: string;
-  apiKey: string;
-  region: string;
-}
-
-interface RunnerFullDto {
-  id: string;
-  name: string;
-  state: "initializing" | "ready" | "disabled" | "decommissioned" | "unresponsive";
-  regionType?: "shared" | "dedicated" | "custom";
-}
-
-// ─── Runner apiKey + name helpers ───────────────────────────────────────────
+// ─── Helpers (CLI-local) ────────────────────────────────────────────────────
 
 // Match apps/api/src/common/utils/api-key.ts:generateApiKeyValue() format so
 // the stored value looks indistinguishable from auto-generated runner keys.
-function generateRunnerApiKey(): string {
+function generateRunnerApiKeyLocal(): string {
   return `dtn_${crypto.randomBytes(32).toString("hex")}`;
 }
 
-export const RUNNER_NAME_REGEX = /^[a-zA-Z0-9_.-]+$/;
+function defaultName(): string {
+  return `runner-shared-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// ─── Runner name validation (kept from lib export for CLI) ──────────────────
 
 export function validateRunnerName(name: string): void {
   if (!RUNNER_NAME_REGEX.test(name)) {
@@ -125,157 +66,6 @@ export function validateRunnerName(name: string): void {
   if (name.length < 2 || name.length > 255) {
     throw new Error(`Runner name '${name}' must be 2–255 chars (got ${name.length}).`);
   }
-}
-
-// ─── Admin API calls ────────────────────────────────────────────────────────
-
-// Probe used as preflight to fail fast on bad/missing/wrong-role admin token.
-// GET /api/admin/runners is guarded by SystemActionGuard + RequiredApiRole=ADMIN,
-// so it returns 401 (no token), 403 (token has wrong role), or 200 (admin).
-async function probeAdminAuth(api: ApiClientOpts): Promise<void> {
-  await apiFetch<unknown>(api, "GET", `/api/admin/runners`);
-}
-
-async function createSharedRunner(
-  api: ApiClientOpts,
-  input: { regionId: string; name: string; apiKey: string },
-): Promise<{ id: string; apiKey: string }> {
-  // AdminCreateRunnerDto requires apiKey + apiVersion. For v2 runners the
-  // server ignores cpu/memoryGiB/diskGiB/domain/apiUrl/proxyUrl — runner
-  // reports those itself via /healthcheck.
-  const r = await apiFetch<CreateRunnerResponseDto>(api, "POST", `/api/admin/runners`, {
-    name: input.name,
-    regionId: input.regionId,
-    apiKey: input.apiKey,
-    apiVersion: "2",
-  });
-  if (!r.id) {
-    throw new Error(`POST /api/admin/runners returned no id: ${JSON.stringify(r)}`);
-  }
-  // Server echoes the apiKey we sent (no hashing here). Sanity-check it.
-  if (r.apiKey && r.apiKey !== input.apiKey) {
-    throw new Error(`Server returned a different apiKey than we sent (unexpected).`);
-  }
-  return { id: r.id, apiKey: input.apiKey };
-}
-
-async function pollUntilReady(
-  api: ApiClientOpts,
-  runnerId: string,
-  timeoutSec: number,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutSec * 1000;
-  while (Date.now() < deadline) {
-    try {
-      const r = await apiFetch<RunnerFullDto>(api, "GET", `/api/admin/runners/${runnerId}`);
-      if (r.state === "ready") return true;
-    } catch (e) {
-      if (!(e instanceof ApiError) || e.status >= 500) {
-        // transient — keep polling
-      } else if (e.status === 404) {
-        throw new Error(`Runner ${runnerId} disappeared from API while polling.`);
-      } else {
-        throw e;
-      }
-    }
-    await new Promise((rs) => setTimeout(rs, 5000));
-  }
-  return false;
-}
-
-// ─── EC2 launch (mirrors sst.config.ts:564-577 default Runner exactly) ──────
-
-const UBUNTU_OWNER_ID = "099720109477";
-const UBUNTU_NAME_PATTERN = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*";
-
-interface Ec2LaunchInput {
-  subnetId: string;
-  instanceProfileName: string;
-  instanceType: string;
-  rootDiskGB: number;
-  userDataBase64: string;
-  tags: Record<string, string>;
-}
-
-interface Ec2LaunchResult {
-  instanceId: string;
-  publicIp: string | null;
-  privateIp: string | null;
-  availabilityZone: string | null;
-  imageId: string;
-}
-
-async function resolveUbuntuAmi(client: EC2Client): Promise<string> {
-  const r = await client.send(
-    new DescribeImagesCommand({
-      Owners: [UBUNTU_OWNER_ID],
-      Filters: [
-        { Name: "name", Values: [UBUNTU_NAME_PATTERN] },
-        { Name: "architecture", Values: ["x86_64"] },
-      ],
-    }),
-  );
-  const images = (r.Images ?? []).filter((i) => i.ImageId && i.CreationDate);
-  images.sort((a, b) => (b.CreationDate ?? "").localeCompare(a.CreationDate ?? ""));
-  if (images.length === 0 || !images[0].ImageId) {
-    throw new Error(`No Ubuntu Noble 24.04 AMI found in region.`);
-  }
-  return images[0].ImageId;
-}
-
-async function launchRunnerEc2(client: EC2Client, input: Ec2LaunchInput): Promise<Ec2LaunchResult> {
-  const imageId = await resolveUbuntuAmi(client);
-  const tagList = Object.entries(input.tags).map(([Key, Value]) => ({ Key, Value }));
-
-  // CpuOptions.NestedVirtualization is required for libkrun/KVM but not yet in
-  // @aws-sdk/client-ec2 types (v3.700) — accepted on the wire, cast through any.
-  const cpuOptions: any = { NestedVirtualization: "enabled" };
-
-  const run = await client.send(
-    new RunInstancesCommand({
-      ImageId: imageId,
-      InstanceType: input.instanceType as _InstanceType,
-      IamInstanceProfile: { Name: input.instanceProfileName },
-      UserData: input.userDataBase64,
-      CpuOptions: cpuOptions,
-      NetworkInterfaces: [
-        {
-          DeviceIndex: 0,
-          SubnetId: input.subnetId,
-          AssociatePublicIpAddress: true,
-        },
-      ],
-      BlockDeviceMappings: [
-        { DeviceName: "/dev/sda1", Ebs: { VolumeSize: input.rootDiskGB } },
-      ],
-      TagSpecifications: [{ ResourceType: "instance", Tags: tagList }],
-      MinCount: 1,
-      MaxCount: 1,
-    }),
-  );
-
-  const instance = run.Instances?.[0];
-  if (!instance?.InstanceId) throw new Error("RunInstances returned no instance.");
-
-  let publicIp: string | null = instance.PublicIpAddress ?? null;
-  let privateIp: string | null = instance.PrivateIpAddress ?? null;
-  let az: string | null = instance.Placement?.AvailabilityZone ?? null;
-
-  for (let i = 0; i < 6; i++) {
-    if (publicIp && privateIp && az) break;
-    await new Promise((r) => setTimeout(r, 5000));
-    const desc = await client.send(
-      new DescribeInstancesCommand({ InstanceIds: [instance.InstanceId] }),
-    );
-    const inst = desc.Reservations?.[0]?.Instances?.[0];
-    if (!inst) break;
-    publicIp = inst.PublicIpAddress ?? publicIp;
-    privateIp = inst.PrivateIpAddress ?? privateIp;
-    az = inst.Placement?.AvailabilityZone ?? az;
-    if (inst.State?.Name === "running") break;
-  }
-
-  return { instanceId: instance.InstanceId, publicIp, privateIp, availabilityZone: az, imageId };
 }
 
 // ─── Result file ────────────────────────────────────────────────────────────
@@ -480,10 +270,6 @@ function parseArgs(): Args {
   };
 }
 
-function defaultName(): string {
-  return `runner-shared-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 function redactApiKey(key: string): string {
   return key.slice(0, 4) + "…" + key.slice(-4);
 }
@@ -505,7 +291,7 @@ async function confirmTty(prompt: string): Promise<boolean> {
 async function main(): Promise<number> {
   const args = parseArgs();
   const runnerName = args.name ?? defaultName();
-  const runnerApiKey = args.apiKey ?? generateRunnerApiKey();
+  const runnerApiKey = args.apiKey ?? generateRunnerApiKeyLocal();
 
   try {
     validateRunnerName(runnerName);
@@ -519,8 +305,6 @@ async function main(): Promise<number> {
     return EXIT.REFUSED;
   }
   if (args.awsProfile) process.env.AWS_PROFILE = args.awsProfile;
-
-  const api: ApiClientOpts = { baseUrl: args.apiUrl, token: args.adminToken };
 
   if (!args.yes) {
     const proceed = await confirmTty(
@@ -547,131 +331,116 @@ async function main(): Promise<number> {
   }
 
   let result: ResultWriter | null = null;
-  let runnerId: string | null = null;
+  let currentApiKey: string | null = null;
+  let currentRunnerId: string | null = null;
 
   try {
-    // ─── Stage 1: verify admin token by probing /api/admin/runners ─────
-    process.stderr.write(`[1/7] Verifying ADMIN token…\n`);
+    // Initialize result file upfront
     result = new ResultWriter(args.resultFile, {
       runner: { name: runnerName, regionId: args.regionId },
       ec2InstanceType: args.instanceType,
     });
     result.flush();
-    await probeAdminAuth(api);
-    result.setAuthVerified();
-    result.flush();
-    process.stderr.write(`       → ADMIN auth OK\n`);
 
-    // ─── Stage 2: generate runner apiKey (already done above) ──────────
-    process.stderr.write(`[2/7] Runner credentials prepared (apiKey ${redactApiKey(runnerApiKey)})…\n`);
-
-    // ─── Stage 3: POST /api/admin/runners ──────────────────────────────
-    process.stderr.write(`[3/7] POST /api/admin/runners…\n`);
-    const r = await createSharedRunner(api, {
-      regionId: args.regionId,
-      name: runnerName,
-      apiKey: runnerApiKey,
-    });
-    runnerId = r.id;
-    result.setRunnerCreated(r.id, runnerApiKey);
-    result.flush();
-    process.stderr.write(`       → runner id=${r.id}\n`);
-
-    // ─── Stage 4: build user-data ──────────────────────────────────────
-    process.stderr.write(`[4/7] Building EC2 user-data…\n`);
-    const { buildRunnerUserData } = await import("../lib/runner-user-data");
-    const userDataBase64 = buildRunnerUserData({
+    // Run generator and loop over events, manually to capture the return value
+    const gen = addSharedRunner({
       apiUrl: args.apiUrl,
-      token: runnerApiKey,
-      registryUrl: args.registryUrl,
-      runnerPort: 3003,
-      withBackupSidecar: args.withBackupSidecar,
-      sidecarPort: args.sidecarPort,
-      backupsBucket: args.backupsBucket,
+      adminToken: args.adminToken,
       awsRegion: AWS_REGION,
-      cargoTomlPath: CARGO_TOML,
-    });
+      name: runnerName,
+      regionId: args.regionId,
+      instanceType: args.instanceType,
+      diskGb: args.rootDiskGB,
+      withBackupSidecar: args.withBackupSidecar,
+      registryUrl: args.registryUrl,
+      subnetId: args.subnetId,
+      instanceProfileName: args.instanceProfileName,
+      timeoutSec: args.timeout,
+      noWait: args.noWait,
+    })
 
-    // ─── Stage 5: launch EC2 ───────────────────────────────────────────
-    process.stderr.write(`[5/7] Launching EC2…\n`);
-    const ec2Client = new EC2Client({ region: AWS_REGION });
-    let ec2Result: Ec2LaunchResult;
-    try {
-      ec2Result = await launchRunnerEc2(ec2Client, {
-        subnetId: args.subnetId,
-        instanceProfileName: args.instanceProfileName,
-        instanceType: args.instanceType,
-        rootDiskGB: args.rootDiskGB,
-        userDataBase64,
-        tags: {
-          Name: `boxlite-runner-${runnerId.slice(0, 8)}`,
-          RunnerId: runnerId,
-          BoxliteOwner: "add-shared-runner-script",
-          BoxliteStack: process.env.BOXLITE_STAGE!,
-          BoxliteRegion: args.regionId,
-        },
-      });
-    } catch (e: any) {
-      result.setEc2Failed(args.apiUrl, e.message ?? String(e));
-      result.flush();
-      throw e;
+    let genNext = await gen.next()
+    let finalResult
+    while (!genNext.done) {
+      const ev = genNext.value as any
+      if (ev.type === 'stage') {
+        if (ev.stage === 1) {
+          result.setAuthVerified();
+          result.flush();
+        }
+        process.stderr.write(`[${ev.stage}/${ev.total}] ${ev.label}…\n`);
+      } else if (ev.type === 'log') {
+        process.stderr.write(`       ${ev.line}\n`);
+      } else if (ev.type === 'warning') {
+        process.stderr.write(`WARNING: ${ev.line}\n`);
+      } else if (ev.type === 'data') {
+        if (ev.key === 'apiKey') {
+          currentApiKey = ev.value as string;
+          process.stderr.write(`       apiKey=${redactApiKey(currentApiKey)} (full value written to ${args.resultFile})\n`);
+        } else if (ev.key === 'runnerId') {
+          currentRunnerId = ev.value as string;
+          if (currentApiKey && currentRunnerId) {
+            result.setRunnerCreated(currentRunnerId, currentApiKey);
+            result.flush();
+          }
+        } else if (ev.key === 'ec2InstanceId') {
+          result.setEc2Launched({
+            instanceId: ev.value as string,
+            publicIp: null,
+            privateIp: null,
+            availabilityZone: null,
+          });
+          result.flush();
+        }
+      }
+      genNext = await gen.next()
     }
-    process.stderr.write(`       → instance ${ec2Result.instanceId}, ip=${ec2Result.publicIp ?? "<pending>"}\n`);
-    result.setEc2Launched({
-      instanceId: ec2Result.instanceId,
-      publicIp: ec2Result.publicIp,
-      privateIp: ec2Result.privateIp,
-      availabilityZone: ec2Result.availabilityZone,
-    });
-    result.flush();
+    finalResult = genNext.value as any
 
-    // ─── Stage 6: maybe wait ───────────────────────────────────────────
-    if (args.noWait) {
-      process.stderr.write(`[6/7] Result file written.\n[7/7] --no-wait: skipping readiness poll. Exiting OK.\n`);
-      return EXIT.OK;
-    }
-    process.stderr.write(`[6/7] Result file written. Polling readiness…\n`);
-
-    // ─── Stage 7: poll for READY ───────────────────────────────────────
-    process.stderr.write(`[7/7] GET /api/admin/runners/${runnerId} until state=ready (timeout ${args.timeout}s)…\n`);
-    const ready = await pollUntilReady(api, runnerId, args.timeout);
-    if (ready) {
+    // Handle final state based on what the generator returned
+    let finalExitCode: number = EXIT.OK;
+    if (finalResult?.finalState === 'READY') {
       result.setReady(args.apiUrl);
-      result.flush();
-      process.stderr.write(`       → READY. Result file: ${args.resultFile}\n`);
-      return EXIT.OK;
-    } else {
+      finalExitCode = EXIT.OK;
+    } else if (finalResult?.finalState === 'TIMEOUT') {
       result.setTimeout();
-      result.flush();
-      process.stderr.write(
-        `       → TIMEOUT waiting for READY. EC2 + runner row exist; investigate.\n` +
-          `       Result file: ${args.resultFile}\n`,
-      );
-      return EXIT.TIMEOUT;
+      finalExitCode = EXIT.TIMEOUT;
+    } else if (finalResult?.finalState === 'INITIALIZING') {
+      // noWait case - still OK but not ready yet
+      finalExitCode = EXIT.OK;
     }
+
+    result.flush();
+    process.stderr.write(`       Result file: ${args.resultFile}\n`);
+    return finalExitCode;
   } catch (e: any) {
-    if (e instanceof ApiError) {
-      process.stderr.write(`ERROR (REST): ${e.message}\n`);
-      if (e.status === 401) {
-        process.stderr.write(
-          `       Hint: BOXLITE_ADMIN_API_KEY is missing/expired. Check the API container's startup log\n` +
-            `             ("Admin user created with API key: ...") or AWS Secrets Manager 'AdminApiKey'.\n`,
-        );
-      }
-      if (e.status === 403) {
-        process.stderr.write(`       Hint: token is valid but lacks ADMIN role.\n`);
-      }
-      if (e.status === 404 && /Region not found/i.test(e.body)) {
-        process.stderr.write(
-          `       Hint: region id '${process.argv.includes("--region-id") ? "?" : "us"}' does not exist.\n` +
-            `             Confirm the API's DEFAULT_REGION_ID matches --region-id (default 'us').\n`,
-        );
-      }
-      return EXIT.API;
+    if (e.message?.includes('aborted')) {
+      return EXIT.REFUSED;
     }
-    if (e.message?.includes("RunInstances") || e.message?.includes("AMI")) {
-      process.stderr.write(`ERROR (Stage 5 EC2): ${e.message}\n`);
-      return EXIT.EC2_LAUNCH;
+    if (e instanceof Error) {
+      if (e.message.includes('admin role') || e.message.includes('ADMIN')) {
+        process.stderr.write(`ERROR (REST): ${e.message}\n`);
+        if (e.message.includes('401')) {
+          process.stderr.write(
+            `       Hint: BOXLITE_ADMIN_API_KEY is missing/expired. Check the API container's startup log\n` +
+              `             ("Admin user created with API key: ...") or AWS Secrets Manager 'AdminApiKey'.\n`,
+          );
+        }
+        if (e.message.includes('403')) {
+          process.stderr.write(`       Hint: token is valid but lacks ADMIN role.\n`);
+        }
+        if (e.message.includes('Region not found')) {
+          process.stderr.write(
+            `       Hint: region id '${process.argv.includes("--region-id") ? "?" : "us"}' does not exist.\n` +
+              `             Confirm the API's DEFAULT_REGION_ID matches --region-id (default 'us').\n`,
+          );
+        }
+        return EXIT.API;
+      }
+      if (e.message.includes('RunInstances') || e.message.includes('AMI')) {
+        process.stderr.write(`ERROR (Stage 5 EC2): ${e.message}\n`);
+        return EXIT.EC2_LAUNCH;
+      }
     }
     process.stderr.write(`ERROR: ${e?.stack ?? e}\n`);
     return EXIT.PREFLIGHT;
