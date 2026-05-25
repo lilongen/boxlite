@@ -25,6 +25,7 @@ import { useWebhookAppPortalAccessQuery } from '@/hooks/queries/useWebhookAppPor
 import { useSelectedOrganization } from '@/hooks/useSelectedOrganization'
 import { useUserOrganizationInvitations } from '@/hooks/useUserOrganizationInvitations'
 import { useWebhooks } from '@/hooks/useWebhooks'
+import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn, getMetaKey } from '@/lib/utils'
 import { usePylon, usePylonCommands } from '@/vendor/pylon'
 import { OrganizationRolePermissionsEnum, OrganizationUserRoleEnum } from '@boxlite-ai/api-client'
@@ -57,6 +58,7 @@ import {
   SunIcon,
   TextSearch,
   Users,
+  Wrench,
 } from 'lucide-react'
 import { useFeatureFlagEnabled, usePostHog } from 'posthog-js/react'
 import React, { useMemo } from 'react'
@@ -113,6 +115,7 @@ export function Sidebar({ isBannerVisible, billingEnabled, version: _version }: 
   const { count: organizationInvitationsCount } = useUserOrganizationInvitations()
   const { isInitialized: webhooksInitialized } = useWebhooks()
   const webhooksAccess = useWebhookAppPortalAccessQuery(selectedOrganization?.id)
+  const { isPlatformAdmin } = useCurrentUser()
   const orgInfraEnabled = useFeatureFlagEnabled(FeatureFlags.ORGANIZATION_INFRASTRUCTURE)
   const organizationExperimentsEnabled = useFeatureFlagEnabled(FeatureFlags.ORGANIZATION_EXPERIMENTS)
   const playgroundEnabled = useFeatureFlagEnabled(FeatureFlags.DASHBOARD_PLAYGROUND)
@@ -250,8 +253,16 @@ export function Sidebar({ isBannerVisible, billingEnabled, version: _version }: 
       })
     }
 
+    if (isPlatformAdmin) {
+      arr.push({
+        icon: <Wrench size={16} strokeWidth={1.5} />,
+        label: 'Runner Ops',
+        path: RoutePath.ADMIN_RUNNER_OPS,
+      })
+    }
+
     return arr
-  }, [authenticatedUserHasPermission, orgInfraEnabled])
+  }, [authenticatedUserHasPermission, orgInfraEnabled, isPlatformAdmin])
 
   const experimentalItems = useMemo(() => {
     if (
