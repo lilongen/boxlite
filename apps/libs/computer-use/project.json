@@ -42,6 +42,27 @@
       "outputs": ["{workspaceRoot}/dist/libs/computer-use-amd64"],
       "cache": true
     },
+    "build-arm64": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "./hack/computer-use/build-computer-use-arm64.sh"
+      },
+      "configurations": {
+        "production": {
+          "command": "if [ -n \"$SKIP_COMPUTER_USE_BUILD\" ]; then echo 'Skipping computer-use build'; else ./hack/computer-use/build-computer-use-arm64.sh; fi"
+        }
+      },
+      "inputs": [
+        "{projectRoot}/**/*.go",
+        "{projectRoot}/go.mod",
+        "{projectRoot}/go.sum",
+        "{workspaceRoot}/hack/computer-use/build-computer-use-arm64.sh",
+        "{workspaceRoot}/hack/computer-use/Dockerfile",
+        "sharedGlobals"
+      ],
+      "outputs": ["{workspaceRoot}/dist/libs/computer-use-arm64"],
+      "cache": true
+    },
     "format": {
       "executor": "nx:run-commands",
       "options": {
