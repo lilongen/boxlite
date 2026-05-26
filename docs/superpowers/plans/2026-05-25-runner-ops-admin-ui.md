@@ -1,5 +1,11 @@
 # Runner Ops Admin UI Implementation Plan
 
+> **2026-05-26 status:** Tasks 1–17 were implemented, then the **dashboard UI
+> layer (Tasks 1, 2, 12–16) was reverted** — current shipped scope is the
+> server-side wrapper (Tasks 3–10) + libs + CLI, driven by curl. See
+> `docs/runner-scaling/runner-ops-api-runbook.md`. This plan is retained as the
+> record for the future UI iteration.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship an admin-only dashboard page that lists SHARED runners and triggers add/scale-down operations by calling the already-validated `apps/infra/scripts/*` orchestration logic as in-process libraries — no auto-scaling, no shell-out, no SSE.

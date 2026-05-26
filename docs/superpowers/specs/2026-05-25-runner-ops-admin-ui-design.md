@@ -1,6 +1,15 @@
 # Design: Runner Ops Admin UI
 
-**Status:** Draft (2026-05-25)
+> **2026-05-26 scope update:** The dashboard UI layer described below was
+> **deferred and removed**. Shipped scope = the **server-side wrapper** only
+> (`apps/api` runner-ops endpoints + `apps/infra/lib` generators + CLI shells),
+> driven by **curl** per `docs/runner-scaling/runner-ops-api-runbook.md`. The
+> dashboard page, components, polling hook, and the `useCurrentUser`/`RequireAdmin`
+> admin-gating scaffolding (and the `UserDto.role` field) were reverted. A
+> dedicated page will connect to these endpoints in a later iteration. The UI
+> design below is retained as the record for that future work.
+
+**Status:** UI deferred — server-side wrapper shipped (2026-05-26)
 **Scope:** Admin-only dashboard page exposing manual `add shared runner` and `scale-down runner` operations by reusing the already-validated `apps/infra/scripts/*` orchestration logic as in-process libraries.
 **Branch:** `feat/cloud-mvp-runner-auto-scaling`
 **Predecessors:**

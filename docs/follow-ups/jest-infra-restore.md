@@ -63,6 +63,18 @@ While unresolved, downstream consumers of the api-client must:
 - Use local stub types (string unions) for new server-side enums/DTOs, or
 - Import from `@boxlite-ai/api-client` only when the type already exists pre-this-PR.
 
+## Related: dashboard `tsc` cannot type-check (same root cause)
+
+`apps/dashboard/tsconfig.json` extends `../../tsconfig.base.json` (repo root,
+missing — actual base is `apps/tsconfig.base.json`). Unlike `apps/api` (which
+emits the TS5083 then continues with default options), the dashboard falls back
+to `moduleResolution: classic`, which cannot resolve the `@/*` path aliases —
+so `tsc -p dashboard/tsconfig.app.json --noEmit` fails outright (TS5083 +
+TS5070) and never type-checks dashboard source. Net effect: **dashboard
+TypeScript is unverifiable on this branch** until the base-config placement is
+fixed (Option A above). This is the third symptom of the same root cause
+(jest preset, api-client regen, dashboard tsc).
+
 ## Impact while unresolved
 
 Unit tests written via Jest cannot execute. The following PRs/work merged a `*.spec.ts` file that is currently not exercised in CI:

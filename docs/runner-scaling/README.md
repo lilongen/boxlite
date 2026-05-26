@@ -44,8 +44,8 @@
 | [`e2e-multi-sandbox-report-v3.md`](./e2e-multi-sandbox-report-v3.md) | **v3**：fresh r1 重测（r2 复用 v2） |
 | [`e2e-multi-sandbox-report-v4.md`](./e2e-multi-sandbox-report-v4.md) | **v4**：双 NEW r1+r2 + 全清重建端到端验证 |
 | [`apps/infra/scripts/README.md`](../../apps/infra/scripts/README.md) | `add-runner.ts` 自身的详细文档（CUSTOM runner 用，与本分支 SHARED 流程互补） |
-| [`runner-ops-ui-runbook.md`](./runner-ops-ui-runbook.md) | Admin Runner Ops UI 操作 runbook（add / scale-down via dashboard） |
-| [`../superpowers/specs/2026-05-25-runner-ops-admin-ui-design.md`](../superpowers/specs/2026-05-25-runner-ops-admin-ui-design.md) | Admin Runner Ops UI 设计 spec |
+| [`runner-ops-api-runbook.md`](./runner-ops-api-runbook.md) | Runner Ops 服务端 wrapper 的 curl/API 操作 runbook（add / scale-down via HTTP） |
+| [`../superpowers/specs/2026-05-25-runner-ops-admin-ui-design.md`](../superpowers/specs/2026-05-25-runner-ops-admin-ui-design.md) | Runner Ops 设计 spec（含已暂缓的 UI 设计，作未来记录） |
 
 ---
 

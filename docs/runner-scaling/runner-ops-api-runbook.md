@@ -1,111 +1,132 @@
-# Runner Ops UI Runbook
+# Runner Ops API Runbook (curl)
 
-> Companion to the design spec
-> `docs/superpowers/specs/2026-05-25-runner-ops-admin-ui-design.md`
-> and the CLI scripts in `apps/infra/scripts/`.
+> Current scope: **server-side wrapper + curl only**. The dashboard UI was
+> deferred — see the status note in
+> `docs/superpowers/specs/2026-05-25-runner-ops-admin-ui-design.md`. A dedicated
+> page will connect to these same endpoints later.
 
-## Audience
+## What this is
 
-Platform operators with `SystemRole.ADMIN` in BoxLite Cloud.
+Five admin-only HTTP endpoints in `apps/api` that wrap the validated
+`apps/infra/lib/*-lib.ts` orchestration (add shared runner / scale-down runner).
+They are the curl-hittable trigger for manual capacity operations and the
+in-process actuation path a future autoscaler will reuse.
 
-## When to use this UI
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET  | `/api/admin/runner-ops/shared` | List SHARED runners |
+| POST | `/api/admin/runner-ops/add-shared` | Provision a SHARED runner (async job) |
+| POST | `/api/admin/runner-ops/:runnerId/scale-down` | Drain + remove a SHARED runner (async job) |
+| GET  | `/api/admin/runner-ops/jobs/:jobId` | Poll job status + progress lines |
+| POST | `/api/admin/runner-ops/jobs/:jobId/cancel` | Cooperative cancel |
 
-- Capacity expansion: add a new SHARED runner without shelling into the build host.
-- Capacity reduction: drain and decommission a SHARED runner with live progress visibility.
+All require a platform-admin bearer token (`SystemActionGuard` +
+`@RequiredApiRole([SystemRole.ADMIN])`). Add/scale-down return `202 { id }`
+immediately; you then poll the job endpoint (the future UI does this every 2 s).
 
-For CUSTOM (per-org) runners, use the existing `apps/infra/scripts/add-runner.ts` CLI.
+## Prerequisites
 
-## Access
+```bash
+# apps/api running with the runner-ops config envs:
+#   BOXLITE_RUNNER_OPS_API_URL        self-loopback base, e.g. http://localhost:3000
+#   BOXLITE_RUNNER_OPS_ADMIN_TOKEN    admin API key used by the lib to self-call apps/api
+#   BOXLITE_RUNNER_OPS_AWS_REGION     e.g. ap-southeast-1
+#   BOXLITE_RUNNER_OPS_SUBNET_ID
+#   BOXLITE_RUNNER_OPS_INSTANCE_PROFILE
+#   BOXLITE_RUNNER_OPS_REGISTRY_URL
+# Redis running (job store + locks). API process has AWS creds (EC2).
 
-Sign in to the dashboard as a user whose `SystemRole === 'admin'`. The
-`Runner Ops` entry appears in the left sidebar under the infrastructure
-section, only for admin users. Direct URL: `/dashboard/admin/runner-ops`.
+export API=http://localhost:3000          # or https://api.boxlite.test
+export ADMIN_TOKEN='<admin-api-key>'      # startup log "Admin user created with API key:" or SST AdminApiKey
+H=(-H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json')
+```
 
-If you reach the URL as a non-admin user, the `RequireAdmin` guard redirects
-you to `/dashboard/sandboxes`.
+Path note: the controller is mounted at `admin/runner-ops` and the API global
+prefix is `api`, so the full path is `$API/api/admin/runner-ops/...`.
 
-## Add a shared runner
+## List shared runners
 
-1. Open Dashboard → Runner Ops.
-2. Click **+ Add runner**.
-3. Optional: set name, region, instance type. Defaults are
-   `runner-shared-<rand>`, `us`, `c8i.2xlarge`.
-4. Click **Add runner**. The dialog now displays a live log streamed from the
-   server-side job record (polled every 2 s).
-5. Watch for status `SUCCESS`. The runner takes ~1–3 minutes to reach `READY`;
-   the dialog only closes successfully once the lib's readiness poll passes.
+```bash
+curl -fsS "${H[@]}" "$API/api/admin/runner-ops/shared" | jq .
+# 200 + { "runners": [ { id, name, regionId, state, availabilityScore, ... } ] }
+# Negative test: drop the token or use a non-admin token -> 401/403.
+```
 
-If the status reaches `FAILED`, copy the log (everything in the gray box) into
-the incident channel and consult the troubleshooting section.
+## Add a shared runner (POST + poll)
+
+`/tmp/test-add.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+: "${API:?}"; : "${ADMIN_TOKEN:?}"
+H=(-H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json')
+
+JOB=$(curl -fsS "${H[@]}" -X POST "$API/api/admin/runner-ops/add-shared" \
+  -d '{"name":"runner-entry-test-1","regionId":"us","instanceType":"c8i.2xlarge"}' \
+  | jq -r .id)
+echo "jobId=$JOB"
+
+while true; do
+  J=$(curl -fsS "${H[@]}" "$API/api/admin/runner-ops/jobs/$JOB")
+  ST=$(echo "$J" | jq -r .status)
+  echo "$J" | jq -r '.lines[-1] // "(no line)"'
+  case "$ST" in
+    SUCCESS) echo "OK"; echo "$J" | jq .result; break ;;
+    FAILED)  echo "FAIL"; echo "$J" | jq .error;  break ;;
+    STALE)   echo "STALE"; break ;;
+  esac
+  sleep 2
+done
+```
+
+```bash
+chmod +x /tmp/test-add.sh && API=$API ADMIN_TOKEN=$ADMIN_TOKEN /tmp/test-add.sh
+```
 
 ## Scale down a shared runner
 
-1. From the Runner Ops table, click **Scale down** on the row.
-2. Optional: tick **Also migrate STOPPED sandboxes** if you want stopped
-   sandboxes restarted on peer runners rather than left archived.
-3. Click **Scale down**.
-4. Watch the 10-stage flow:
+```bash
+RUNNER_ID='<id from /shared>'
 
-   ```text
-   [1/10] preflight
-   [2/10] cordon source
-   [3/10] enumerate sandboxes
-   [4/10] stop STARTED sandboxes
-   [5/10] backup all sandboxes
-   [6/10] archive all
-   [7/10] restart on peer
-   [8/10] drain wait
-   [9/10] delete runner row
-   [10/10] terminate EC2
-   ```
+# Dry run -- preflight only, no side effects:
+curl -fsS "${H[@]}" -X POST "$API/api/admin/runner-ops/$RUNNER_ID/scale-down" \
+  -d '{"dryRun":true}' | jq .
 
-5. On `SUCCESS`, the row disappears from the table and the EC2 instance is
-   terminated.
+# Real scale-down, then poll the returned job id like the add flow above:
+JOB=$(curl -fsS "${H[@]}" -X POST "$API/api/admin/runner-ops/$RUNNER_ID/scale-down" \
+  -d '{"restartStopped":false}' | jq -r .id)
+```
 
-## Troubleshooting
+## Concurrency lock (mechanism test, no AWS needed)
 
-| Symptom | Likely cause | Recovery |
-| --- | --- | --- |
-| `409 Conflict` on Add | Another add-shared job is already running | Wait for it to finish; refresh the page. |
-| Status `FAILED` at preflight | Runner is not SHARED+READY, or no peer in same region | Verify region/state in the table; you cannot scale down if no peer accepts the boxes. |
-| Status `FAILED` at `[5/10] backup` | Backup timed out (default 900 s) | The source remains cordoned. Inspect the sandbox via the existing sandbox detail page, then re-run scale-down via the CLI with `--max-wait-backup 1800`. |
-| Status `STALE` | API restarted mid-job | Check EC2 and apps/api state, manually clean up, then re-run. |
-| Runner stuck in `INITIALIZING` for >5 min | EC2 user-data failed; runner cannot register | SSH into the EC2 (via `aws ssm start-session`); inspect `journalctl -u boxlite-runner`. |
-| 401/403 on the page itself | Logged in as a non-admin user, or token expired | Re-login as a platform admin. |
+```bash
+# Two adds at once: one 202, the other 409 (runner-ops:lock:add-shared).
+curl -s "${H[@]}" -X POST "$API/api/admin/runner-ops/add-shared" -d '{"name":"a"}' &
+curl -s -o /dev/null -w "%{http_code}\n" "${H[@]}" -X POST "$API/api/admin/runner-ops/add-shared" -d '{"name":"b"}'
+```
 
-## CLI escape hatches
+## Minimal smoke (no AWS)
 
-Both operations remain available as CLIs. They share the same orchestration
-libraries as the UI (`apps/infra/lib/add-shared-runner-lib.ts` and
-`apps/infra/lib/scale-down-runner-lib.ts`), so behaviour is identical:
+List (auth + routing) + the 409 lock test exercise controller -> service ->
+Redis job -> lock -> poll without touching EC2. A no-AWS add still proves the
+chain: the job moves to `RUNNING` then `FAILED` at the EC2 step, but the
+entry-point mechanics are covered.
+
+## CLI equivalents
+
+The same libs back two CLIs (identical behaviour, no HTTP):
 
 ```bash
 cd apps/infra
-BOXLITE_ADMIN_API_KEY=<token> AWS_PROFILE=<...> \
-  npx tsx scripts/add-shared-runner.ts --name <...> --yes
-
-BOXLITE_ADMIN_API_KEY=<token> AWS_PROFILE=<...> \
-  npx tsx scripts/scale-down-runner.ts --id <runner-id> --yes
+BOXLITE_ADMIN_API_KEY=<token> AWS_PROFILE=<...> npx tsx scripts/add-shared-runner.ts --name <...> --yes
+BOXLITE_ADMIN_API_KEY=<token> AWS_PROFILE=<...> npx tsx scripts/scale-down-runner.ts --id <id> --yes
 ```
 
-These exhibit identical behaviour to the UI flow and accept extra knobs
-(timeouts, `--dry-run`, `--skip-ec2-terminate`). Consult their `--help`.
+## Audit + limits
 
-## Audit trail
-
-Every operation generates entries in the API's audit log (`AuditModule`). Job
-records live in Redis for 24 hours under the key prefix `runner-ops:job:`.
-
-## Known limitations (MVP)
-
-- No autoscaling. Operators trigger every action manually.
-- No CUSTOM runner UI. Use the CLI for per-org runners.
-- One concurrent add + one concurrent scale-down across the platform (Redis
-  locks `runner-ops:lock:add-shared` and `runner-ops:lock:scale-down`).
-- No SSE; UI polls every 2 s.
-- Job records expire after 24 hours.
-- Foundation gap: `apps/jest.preset.js` and api-client regen are currently
-  broken on this branch (see
-  `docs/follow-ups/jest-infra-restore.md`). Unit tests written for the new
-  modules will execute once that follow-up lands; for now manual e2e covers
-  behavioural verification.
+- Audit entries via `AuditModule`; job records in Redis under `runner-ops:job:` (TTL 24h).
+- One concurrent add + one concurrent scale-down platform-wide (Redis locks).
+- No autoscaling (manual trigger only). No CUSTOM runner support (use `add-runner.ts`).
+- Foundation gaps on this branch (jest preset, api-client regen, dashboard tsc
+  base config) are tracked in `docs/follow-ups/jest-infra-restore.md`.
