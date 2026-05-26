@@ -27,14 +27,33 @@ if [[ "$current_status" == "Running" ]]; then
   exit 0
 fi
 
+# Run limactl start fully detached so it survives this shell's lifetime.
+# Provision blocks (apt + cargo + nx) can take 15–30 min on first boot;
+# the calling shell (or Claude's Bash tool, or a CI runner) might reap
+# its children well before that, and that cascades a SIGTERM into Lima's
+# hostagent and kills the VM mid-provision. Reparent to launchd (PID 1)
+# via the subshell-orphan trick and tail the log via `make lima-tail-logs`
+# or watch `make lima-status` until READY.
+LOG="${TMPDIR:-/tmp}/lima-up-${LIMA_NAME}.log"
 if [[ -n "$current_status" ]]; then
-  echo "Lima VM '${LIMA_NAME}' exists (status: $current_status), starting..."
-  limactl start "$LIMA_NAME"
+  echo "Lima VM '${LIMA_NAME}' exists (status: $current_status), starting (detached, log → $LOG)..."
+  ( nohup limactl start "$LIMA_NAME" </dev/null >"$LOG" 2>&1 & )
 else
-  echo "Creating Lima VM '${LIMA_NAME}' from $LIMA_YAML"
-  limactl start --name="$LIMA_NAME" --tty=false "$LIMA_YAML"
+  echo "Creating Lima VM '${LIMA_NAME}' from $LIMA_YAML (detached, log → $LOG)"
+  ( nohup limactl start --name="$LIMA_NAME" --tty=false "$LIMA_YAML" </dev/null >"$LOG" 2>&1 & )
 fi
 
+# Give limactl a moment to register the instance, then surface state.
+sleep 3
 echo
-echo "Lima VM '${LIMA_NAME}' ready:"
-limactl list "$LIMA_NAME"
+echo "Lima VM '${LIMA_NAME}' state:"
+limactl list "$LIMA_NAME" 2>&1
+echo
+echo "Provision is running in background. Watch with:"
+echo "  tail -f $LOG"
+echo "  make lima-tail-logs   # streams runner journal once unit exists"
+echo "  make lima-status      # quick state"
+echo
+echo "Runner becomes ready when:"
+echo "  limactl shell ${LIMA_NAME} sudo systemctl is-active boxlite-runner"
+echo "returns 'active'. First-time provision typically 15-30 minutes."
