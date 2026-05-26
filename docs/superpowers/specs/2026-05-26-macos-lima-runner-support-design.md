@@ -24,7 +24,7 @@ autoscaler work in `docs/apps/cloud-mvp-plan.md` Phase 4.
 | 4 | **Hard constraint:** Lima yaml MUST set `vmType: vz` + `nestedVirtualization: true` | Without it `/dev/kvm` is not exposed inside the guest and libkrun's KVM backend cannot create microVMs. M5 + current macOS supports it. See `memory/feedback_lima_nested_virt_required.md`. |
 | 5 | **Nx target structure:** add `-arm64` sibling targets to `-amd64` ones ("Option A — duplicate") | Nx cache stays sound, project-graph unchanged. Parameterized variants (Option B) and separate project (Option C) and out-of-Nx side files (Option D) were considered and rejected. |
 | 6 | **M5 native runner:** NOT taken offline; coexists with Lima runner | Lima parity is the *long-term* default but native is the *short-term* escape hatch. Cost: two build products of `libboxlite.a` (darwin/arm64 HVF + linux/arm64 KVM), one doc paragraph, and an operational rule "start only one at a time". Go source is unchanged. |
-| 7 | **Cross-link fallback policy for linux/arm64 `libboxlite.a` on M5:** try cross first, abort to "build in Lima" if cross does not work within ~2 hours of investigation | Allows the fast-iter path if it pans out, without blocking the branch on a toolchain rabbit hole. |
+| 7 | **Cross-link policy for linux/arm64 `libboxlite.a` on M5:** binary criterion — Phase A passes if either (i) M5 cross-link to linux/arm64 works *or* (ii) Phase A's arm64 Nx targets are explicitly documented as "in-Lima only" and Phase C is the sole producer | Avoids a vague "I'll try for N hours" promise; either we ship cross-link or we ship the in-Lima path, no half-states. |
 | 8 | **vmnet shared prerequisites accepted:** `brew install socket_vmnet` + `limactl sudoers` step is part of first-time setup | Documented in the README; `lima-doctor` detects and instructs. |
 
 ## 3. Reference-vs-target mapping
@@ -40,12 +40,12 @@ specific items below differ.
 | `apps/runner/project.json` `copy-daemon-bin` (hardcoded `-amd64`) | Add `copy-daemon-bin-arm64` sibling; same shape, `-arm64` source/output |
 | `apps/runner/project.json` `copy-computeruse-plugin` (hardcoded `-amd64`) | Add `copy-computeruse-plugin-arm64` sibling |
 | `apps/runner/packaging/deb/DEBIAN/control` — `Architecture: amd64` hardcoded | Template the `Architecture` field with `${ARCH}`; `package-deb-amd64` + new `package-deb-arm64` Nx targets each render their own variant |
-| `apps/runner/packaging/systemd/boxlite-runner.service` — arch-neutral | Reuse as-is; Lima provision script writes `/etc/boxlite/runner.env` (the unit already loads it) |
+| EC2 user-data inlines a self-contained systemd unit with `Environment=…` lines, NOT consuming `apps/runner/packaging/systemd/boxlite-runner.service` (see `sst.config.ts:621-647`) | Lima **diverges intentionally**: it installs the packaged `boxlite-runner.service` (which uses `EnvironmentFile=-/etc/boxlite/runner.env`) and renders that env file from the provision script. Cleaner shape, single source of truth for the unit, but explicitly a divergence from EC2 — not parity. |
 | `apps/runner/Dockerfile` (amd64 paths only) | **Not changed** — Lima does not consume a container image; runner is a systemd binary inside the guest. (Out of scope per §10.4.) |
 | `apps/infra/sst.config.ts:buildRunnerUserData` — EC2 cloud-init: download tarball, write systemd unit, set env from IMDSv2 host IP, `systemctl enable --now` | `apps/infra-local/lima/runner.yaml` `provision:` blocks → call `apps/infra-local/lima/provision/{install-toolchain,build-runner,install-runner}.sh`. Builds (not downloads) the binary; reads VM IP from `ip route` (not IMDSv2); renders `/etc/boxlite/runner.env`; `systemctl enable --now boxlite-runner`. |
 | `scripts/deploy/runner-update-binary.sh` (SSM Run Command pushes new tarball + restarts service) | `apps/infra-local/scripts/lima-runner-update.sh` (`limactl shell` → in-VM `nx build` against the source mount → `sudo cp` → `sudo systemctl restart`) |
 | EC2 user-data hardcodes `INSECURE_REGISTRIES=<registryHost>` from SST output | Lima provision/env injects `INSECURE_REGISTRIES=<host-vmnet-ip>:25000` discovered from the VM's `ip route` / lima's host gateway address |
-| `RUNNER_DOMAIN=$HOST_IP` (from IMDSv2) | `RUNNER_DOMAIN=$(ip -4 -o addr show | awk '/192.168/{print $4}' | cut -d/ -f1)` (the VM's vmnet IP) |
+| `RUNNER_DOMAIN=$HOST_IP` (from IMDSv2) | `RUNNER_DOMAIN=$(limactl shell default -- ip -j -4 addr show lima0 \| jq -r '.[0].addr_info[0].local')` — query Lima's own vmnet interface (`lima0`) directly inside the guest rather than substring-matching `192.168` on the host (which may collide with UTM / Parallels / Docker Desktop networks). |
 | Runner self-registers via `POST /admin/runners` from `apps/runner/pkg/runner/v2/healthcheck` | Same code path. `BOXLITE_API_URL=http://<host-vmnet-ip>:3001/api` is set so the heartbeat reaches the API on the host. |
 
 Net-new artifacts with no EC2 analogue:
@@ -111,7 +111,40 @@ work. Total estimate: ~3 days of focused effort.
 
 ### Phase A — Build pipeline: arm64 variants exist (~0.5–1 day)
 
-**Deliverables**
+**Preconditions (verify, then commit to deliverables):**
+
+A surprise from review: `apps/runner/pkg/daemon/assets.go` is just
+`//go:embed static/*`, and `pkg/daemon/util.go::WriteStaticBinary` is
+exported but has **no callers** in the runner crate or in the Rust SDK
+(`sdks/go/`). Build-time, `copy-daemon-bin` copies `daemon-amd64` into
+`pkg/daemon/static/` and `//go:embed` picks it up, but no Go code reads
+it. The embedded asset appears to be dead code today. Same likely true
+for `boxlite-computer-use` (no caller found in runner controllers).
+
+**Phase A first step (~30 min):**
+
+1. Re-grep the runner + Rust SDK for any consumer of
+   `pkg/daemon/static/daemon-*` or `pkg/daemon/static/boxlite-computer-use`
+   (extended to non-obvious paths: v2 executor handlers, snapshot
+   manager build hooks, ad-hoc bash scripts under `apps/runner/scripts/`
+   if any).
+2. Classify into one of two states:
+   - **State A1 — dead embed:** no live consumer found. The Nx target
+     duplication is still useful for pipeline parity (so future
+     consumers can rely on `daemon-${arch}` being available), but **no
+     Go code change is required in this branch**, and there is no
+     "GOARCH-selection bug" to fix on the M5-native path either (§8.4
+     loses urgency).
+   - **State A2 — live but hardcoded:** a consumer reads
+     `static/daemon-amd64` literally. The Nx target duplication is
+     necessary, **and** the consumer must be patched to read
+     `static/daemon-` + `runtime.GOARCH`. Add a deliverable: small Go
+     change + unit test.
+
+The rest of Phase A's deliverables proceed regardless of A1/A2 outcome —
+only the Go-side patching deliverable is conditional.
+
+**Deliverables (unconditional):**
 
 - `apps/daemon/project.json` — new `build-arm64` target mirroring `build-amd64`
 - `apps/libs/computer-use/project.json` — new `build-arm64` target; new
@@ -120,6 +153,12 @@ work. Total estimate: ~3 days of focused effort.
   `copy-computeruse-plugin-arm64`, `build-arm64`; new `package-deb-arm64`
 - `apps/runner/packaging/deb/DEBIAN/control` — `Architecture: ${ARCH}` template
 
+**Deliverables (conditional, only if Phase A first step lands on State A2):**
+
+- `apps/runner/pkg/daemon/util.go` (or whichever file holds the
+  consumer): switch to `runtime.GOARCH`-keyed lookup; add unit test
+  covering both arm64 and amd64 paths.
+
 **DoD**
 
 - `VERSION=0.0.0-dev nx build daemon --target=build-arm64` produces
@@ -127,10 +166,15 @@ work. Total estimate: ~3 days of focused effort.
   ARM aarch64`.
 - Same for `computer-use-arm64`.
 - `nx build runner --target=build-arm64` produces `dist/apps/runner-arm64`,
-  `ELF aarch64`. Cross-link fallback: if cross-link from macOS to linux/arm64
-  fails within ~2 hours of investigation, drop the M5-side claim and document
-  that runner builds must occur in Lima; Phase C still satisfies the goal.
-- All existing `build-amd64` / `package-deb` flows still pass.
+  `ELF aarch64`. Cross-link policy: Phase A passes if either (i) the
+  M5-side cross-link works, or (ii) the arm64 Nx targets are explicitly
+  documented as "in-Lima only" in `apps/runner/project.json` comments
+  and Phase C is the sole producer — never half-states (see §2 row 7).
+- All existing `build-amd64` flows still green: `nx build runner` and
+  `nx run runner:package-deb-amd64` produce byte-equivalent output to
+  `main` (regression guard).
+- Phase A first-step writeup lives in the PR description: which State
+  (A1 / A2) was found, with grep evidence.
 
 ### Phase B — Lima VM brought up, KVM verified (~0.5 day)
 
@@ -191,7 +235,14 @@ work. Total estimate: ~3 days of focused effort.
   `API_VERSION=2`, `API_PORT=3003`, `RUNNER_DOMAIN=<vm-ip>`,
   `BOXLITE_HOME_DIR=/var/lib/boxlite`,
   `INSECURE_REGISTRIES=<host-vmnet-gw-ip>:25000`,
-  `AWS_REGION=us-east-1`); `systemctl enable --now boxlite-runner`.
+  `AWS_REGION=ap-southeast-1` — same value as `REGION` in `apps/infra/sst.config.ts:22`); `systemctl enable --now boxlite-runner`.
+
+  *EC2-only items deliberately skipped in Lima:* `mount-s3` (Mountpoint for
+  Amazon S3, installed by `sst.config.ts:606-610` for sandbox volume mounts)
+  is not installed in Lima. Volume-mount-from-S3 parity is **out of scope**
+  for this branch (§7.6 below). Local volume-mount uses minio over the
+  S3 protocol via `INSECURE_REGISTRIES`-equivalent host wiring — that
+  capability is L1-stack-side, not runner-host-side.
 - `apps/infra-local/scripts/lima-runner-update.sh` — pulls latest source via
   the mount, rebuilds in VM, restarts the systemd unit.
 - `apps/infra-local/scripts/lima-tail-logs.sh` — `limactl shell default --
@@ -222,7 +273,11 @@ work. Total estimate: ~3 days of focused effort.
 
 **DoD**
 
-- `make lima-doctor` passes on a clean machine after `make lima-up`.
+- `make lima-doctor` passes after a verifiable clean-state setup:
+  fresh `brew install lima socket_vmnet` + `limactl sudoers | sudo tee
+  /etc/sudoers.d/lima`, and `~/.lima/` contains no prior state for the
+  runner template. ("Clean machine" is too hand-wavy — anchor to those
+  three observable preconditions.)
 - A reader following `apps/infra-local/lima/README.md` from scratch can
   `make lima-up && create sandbox via dashboard && delete sandbox &&
   make lima-down` without consulting other docs.
@@ -252,11 +307,21 @@ blocks for daemon/computer-use copy and two for build/package. The shape:
 "build-arm64": { "dependsOn": ["copy-daemon-bin-arm64", "copy-computeruse-plugin-arm64", "check-version-env"], ... }
 ```
 
-The runner binary embeds the daemon matching its host arch — picked at
-runtime by reading `runtime.GOARCH` inside the runner's daemon-injection
-code. (Phase A confirms this code path picks `daemon-${runtime.GOARCH}`;
-if today it hardcodes `daemon-amd64`, that line gets fixed as part of
-Phase A.)
+The build pipeline produces `pkg/daemon/static/daemon-${arch}` and
+`pkg/daemon/static/boxlite-computer-use` (the latter has no arch suffix
+in the copy target). `//go:embed static/*` picks up whatever files
+landed there. **Whether any Go code actually reads these embedded
+assets at runtime is an open question** — `pkg/daemon/util.go::WriteStaticBinary`
+is exported but has no caller grep finds in `apps/runner/` or
+`sdks/go/`. Phase A's first-step audit (§5 Phase A) settles this:
+
+- If the embed is dead, the Nx duplication is forward-looking pipeline
+  parity and zero Go change is required.
+- If a live consumer exists and reads `daemon-amd64` literally, Phase A
+  patches it to read `daemon-` + `runtime.GOARCH`.
+
+Either way, this branch does not invent a new arch-selection scheme;
+it either uses one that exists or notes that none is needed.
 
 ## 7. Out of scope (explicit)
 
@@ -284,7 +349,10 @@ Go source is unchanged; the cost of coexistence is:
   use and how to switch.
 - Operational rule: start only one runner at a time to avoid double
   registration / scheduler confusion. (Whether double-registration is
-  actually harmful is itself a check item in Phase E.)
+  actually harmful is itself a check item promoted to **Phase D** —
+  that is the first time both runners are wired and registered against
+  the same API simultaneously, so the failure mode is verifiable then,
+  not at the Phase E docs pass.)
 
 ### 7.4 Dockerfile arm64
 
@@ -298,6 +366,20 @@ Lima builds from source via the mount; there is no need for
 `boxlite-runner-v${VERSION}-linux-arm64.tar.gz` on GitHub Releases. Once
 Phase A targets exist, CI can add a `matrix: [amd64, arm64]` if a consumer
 appears; that's an independent half-day of work, deferred.
+
+### 7.6 Sandbox volume-mount-from-S3 parity (Mountpoint-S3)
+
+EC2 user-data installs `mount-s3` (Mountpoint for Amazon S3,
+`sst.config.ts:606-610`) so sandboxes that declare S3-backed volume
+mounts can have them materialized on the runner host. This branch
+**does not install mount-s3 in Lima**. Rationale: (a) the local
+L1 stack uses MinIO for object storage, not real S3; if a local
+sandbox needs MinIO-backed mounts, that flows through the runner's
+existing `INSECURE_REGISTRIES`-style wiring without requiring
+mount-s3 on the runner host; (b) any S3-backed mount feature that
+genuinely needs Mountpoint-S3 is a prod-only capability today and
+exercising it locally adds AWS-creds setup with no MVP value.
+Revisit if/when a local sandbox flow demonstrably needs it.
 
 ## 8. Risks
 
@@ -342,16 +424,67 @@ the `command`, `outputs`, and `dependsOn`. Naïve dynamic substitution
 breaks Nx cache hashing. Decision row 5 picks Option A (duplicate target
 block) precisely to avoid this — Nx sees fixed I/O paths per target.
 
-### 8.4 The M5-native runner today also lacks `daemon-arm64`
+### 8.4 The runner's `pkg/daemon/static/` embed may be dead code
 
-The runner's embedded daemon-arm64 may already be missing on the
-M5-native path (only `daemon-amd64` is copied by the existing Nx target).
-Whether today's M5-native sandboxes actually run an arm64 daemon
-(observable via `cat /proc/cpuinfo` inside the microVM) is an open data
-point. Phase A's daemon-arm64 build target will be picked up by the
-runner's arch-selecting injection code, which may either fix or surface a
-hidden defect on the M5-native path. Phase D and Phase E will explicitly
-verify behavior on both paths.
+Reviewer-surfaced finding: `pkg/daemon/util.go::WriteStaticBinary` is
+exported but uncalled in the runner crate and Rust SDK; the embed at
+`//go:embed static/*` is populated by build, but nothing reads it at
+runtime that grep finds. If it really is dead code, this branch ships
+arm64 build targets that are pipeline-correct but functionally inert —
+no harm done, but worth documenting. If a hidden consumer exists,
+Phase A's first-step audit (§5) discovers it and lifts the conditional
+deliverable. Either way, the M5-native path's prior behavior is
+unaffected by this branch since neither path actually consumes the
+embedded daemon today.
+
+### 8.5 L1 service reachability from Lima VM (vmnet shared)
+
+infra-local publishes L1 services (postgres :25432, registry :25000,
+dex :25556, otel :24317, etc.) on the M5 host. With `vmnet shared`, the
+Lima guest reaches the host via the vmnet gateway IP (typically
+`192.168.105.1`) — but **only services bound to `0.0.0.0` or to the
+vmnet interface are reachable**. Services bound to `127.0.0.1` are
+invisible from the guest. The runner's env needs
+`INSECURE_REGISTRIES=<host-vmnet-ip>:25000`, but that only works if the
+registry box has bound to a routable address.
+
+**Mitigation:** Phase B DoD already includes "from VM,
+`curl http://<host-vmnet-gw-ip>:25000/v2/` reaches the L1 registry
+box". Expand it to also test `:25432` (postgres), `:25556` (dex), and
+`:24317` (otel). If any binds 127.0.0.1-only, file a follow-up to
+adjust `apps/infra-local/boxlite_local/services.py` to bind `0.0.0.0`
+explicitly. This is an L1-stack-side fix, not a runner-side fix, and
+must be resolved as a Phase B blocker — Lima runner cannot pull
+sandbox images otherwise.
+
+### 8.6 Source mount writes from Lima can pollute the host repo
+
+§4's `mounts:` block mounts `~/github/boxlite-macos-lima-runner-support`
+into the Lima guest `writable: true`. Phase C runs `nx build` inside
+the guest, which will scatter:
+
+- `dist/` outputs (UID-mismatched between macOS user and `lima` user)
+- `node_modules/` (Linux-arch binaries that confuse `yarn` on macOS)
+- `target/` (Cargo / Rust build artifacts for linux/arm64)
+- Go module cache writes if `GOMODCACHE` is not overridden
+
+… into the host tree, dirtying `git status` and confusing the M5-native
+build that decision row 6 explicitly preserves.
+
+**Mitigation:** in Lima, override build outputs to an out-of-tree
+directory inside the guest:
+
+```
+NX_CACHE_DIRECTORY=$HOME/.cache/nx
+GOMODCACHE=$HOME/go/pkg/mod
+CARGO_TARGET_DIR=$HOME/cargo-target
+```
+
+… set in `apps/infra-local/lima/provision/build-runner.sh` so all
+intermediate state lives in `/home/${USER}.linux/` (Lima's own home,
+not the mounted host repo). Only final binaries get copied to
+`/opt/boxlite/`. Add a Phase D DoD: `git status` on the host shows no
+unexpected changes after a full Lima build cycle.
 
 ## 9. Layout — where new files live
 
@@ -410,12 +543,21 @@ file dist/apps/daemon-arm64                    # ELF aarch64
 nx build runner --target=build-arm64
 file dist/apps/runner-arm64                    # ELF aarch64
 
+# Phase A — amd64 regression guard (existing path still works)
+VERSION=0.0.0-dev nx build daemon --target=build-amd64
+nx build runner --target=build-amd64
+nx run runner:package-deb-amd64                # deb produced; Architecture field == amd64
+
 # Phase B
 make lima-up
 limactl shell default -- ls -la /dev/kvm
 limactl shell default -- ip -4 -o addr show
 ping <vm-ip>                                   # from host
-limactl shell default -- curl http://<host-gw-ip>:25000/v2/
+# L1 reachability (per §8.5 — all must succeed):
+limactl shell default -- curl http://<host-gw-ip>:25000/v2/        # registry
+limactl shell default -- nc -zv  <host-gw-ip> 25432                # postgres
+limactl shell default -- curl http://<host-gw-ip>:25556/dex/...    # dex
+limactl shell default -- nc -zv  <host-gw-ip> 24317                # otel grpc
 
 # Phase C
 limactl shell default -- /opt/boxlite/runner --version
@@ -424,6 +566,12 @@ limactl shell default -- /opt/boxlite/runner --version
 limactl shell default -- systemctl status boxlite-runner
 # Then via dashboard: create sandbox; open terminal; run:
 #   cat /proc/cpuinfo | grep -i 'aarch64'
+# Double-registration check (per §7.3):
+#   start M5-native and Lima runner concurrently; verify scheduler
+#   behavior — does API gracefully handle two runners, or does
+#   sandbox creation break? Record finding in PR.
+# Host repo cleanliness (per §8.6):
+git status                                     # no unexpected files
 
 # Phase E
 make lima-doctor                                # all green
