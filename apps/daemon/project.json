@@ -57,6 +57,26 @@
         { "dependentTasksOutputFiles": "**/*", "transitive": true }
       ]
     },
+    "build-arm64": {
+      "executor": "@nx-go/nx-go:build",
+      "options": {
+        "main": "{projectRoot}/cmd/daemon/main.go",
+        "outputPath": "dist/apps/daemon-arm64",
+        "env": {
+          "GOARCH": "arm64",
+          "GOOS": "linux",
+          "CGO_ENABLED": "0"
+        },
+        "flags": ["-ldflags \"-X 'github.com/boxlite-ai/daemon/internal.Version=$VERSION'\""]
+      },
+      "dependsOn": ["prepare"],
+      "inputs": [
+        "goProduction",
+        "^goProduction",
+        { "env": "VERSION" },
+        { "dependentTasksOutputFiles": "**/*", "transitive": true }
+      ]
+    },
     "serve": {
       "executor": "@nx-go/nx-go:serve",
       "options": {
