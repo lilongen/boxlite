@@ -1,0 +1,63 @@
+# BoxLite runner host — Lima VM template.
+#
+# Hard requirements:
+#   - vmType: vz (vmnet shared only works on the vz driver)
+#   - nestedVirtualization: true (without this, /dev/kvm is not exposed in the
+#     guest, and libkrun's KVM backend cannot create microVMs — see feedback
+#     memory feedback_lima_nested_virt_required.md).
+#
+# Networking: vmnet shared. The VM gets its own IP on the host's vmnet subnet
+# (typically 192.168.105.0/24). This mirrors EC2's HOST_IP semantics so the
+# runner can self-register with its own routable address. Requires
+# socket_vmnet installed via brew and limactl sudoers configured. See
+# apps/infra-local/lima/README.md for first-time setup.
+
+vmType: vz
+arch: aarch64
+
+images:
+  - location: https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img
+
+cpus: 4
+memory: 8GiB
+disk: 60GiB
+
+nestedVirtualization: true
+
+networks:
+  - lima: shared
+
+# Mount the host repo into the guest read-write so we can build in-place.
+# All Nx / Go / Cargo build state inside the guest is redirected to $HOME
+# (see provision/build-runner.sh) to avoid polluting the host repo tree.
+mounts:
+  - location: "~/github/boxlite-macos-lima-runner-support"
+    mountPoint: "/home/{{.User}}.linux/boxlite"
+    writable: true
+
+provision:
+  # System-level: apt packages + Go + (Rust is installed per-user below).
+  # {{.User}} is the host username (Lima renders it at config time); the
+  # guest's mount lives at /home/{{.User}}.linux/boxlite per the mounts: block.
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      bash "/home/{{.User}}.linux/boxlite/apps/infra-local/lima/provision/install-toolchain.sh"
+  # User-level: cargo + nx build of the linux/arm64 runner.
+  - mode: user
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      bash "/home/${USER}.linux/boxlite/apps/infra-local/lima/provision/build-runner.sh"
+  # System-level: copy built binary into /opt/boxlite, install systemd unit
+  # + EnvironmentFile, enable + start the service.
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      bash "/home/{{.User}}.linux/boxlite/apps/infra-local/lima/provision/install-runner.sh"
+
+containerd:
+  system: false
+  user: false

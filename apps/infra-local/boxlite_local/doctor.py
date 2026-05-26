@@ -14,9 +14,12 @@ out of scope for the walking skeleton.
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import InfraConfig
 from .types import DoctorCheck, DoctorError, DoctorReport, ServiceSpec, Severity
@@ -157,6 +160,199 @@ def check_port_free(port: int) -> DoctorCheck:
     )
 
 
+# ── Lima runner preflight ────────────────────────────────────────────────────
+#
+# These checks are only meaningful when the user is running the Lima runner
+# path (via `make lima-up`). Gated on LIMA=1 environment variable.
+
+
+def _lima_status(name: str) -> str | None:
+    """Return Lima instance status (Running / Stopped / etc.), or None if absent."""
+    if not shutil.which("limactl"):
+        return None
+    proc = subprocess.run(
+        ["limactl", "list", "--json"],
+        capture_output=True, text=True, check=False,
+    )
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get("name") == name:
+            return d.get("status", "")
+    return None
+
+
+def check_limactl_installed() -> DoctorCheck:
+    """Verify limactl is on PATH."""
+    if shutil.which("limactl") is None:
+        return DoctorCheck(
+            name="lima-limactl-installed",
+            severity=Severity.FAIL,
+            msg="limactl not found",
+            hint="brew install lima",
+        )
+    return DoctorCheck(
+        name="lima-limactl-installed",
+        severity=Severity.OK,
+        msg="limactl present",
+    )
+
+
+def check_socket_vmnet() -> DoctorCheck:
+    """Verify socket_vmnet is installed (required for vmnet shared networking)."""
+    candidates = [
+        Path("/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet"),
+        Path("/usr/local/opt/socket_vmnet/bin/socket_vmnet"),
+    ]
+    if not any(p.exists() for p in candidates):
+        return DoctorCheck(
+            name="lima-socket-vmnet-installed",
+            severity=Severity.FAIL,
+            msg="socket_vmnet missing",
+            hint="brew install socket_vmnet",
+        )
+    return DoctorCheck(
+        name="lima-socket-vmnet-installed",
+        severity=Severity.OK,
+        msg="socket_vmnet present",
+    )
+
+
+def check_lima_sudoers() -> DoctorCheck:
+    """Verify /etc/sudoers.d/lima exists and references socket_vmnet."""
+    p = Path("/etc/sudoers.d/lima")
+    if not p.exists():
+        return DoctorCheck(
+            name="lima-sudoers-configured",
+            severity=Severity.FAIL,
+            msg="lima sudoers not configured",
+            hint="limactl sudoers | sudo tee /etc/sudoers.d/lima",
+        )
+    return DoctorCheck(
+        name="lima-sudoers-configured",
+        severity=Severity.OK,
+        msg="lima sudoers present",
+    )
+
+
+def check_lima_vm_running(name: str) -> DoctorCheck:
+    """Verify the boxlite-runner Lima VM is Running."""
+    status = _lima_status(name)
+    if status is None:
+        return DoctorCheck(
+            name="lima-vm-present",
+            severity=Severity.FAIL,
+            msg=f"Lima VM '{name}' does not exist",
+            hint="make lima-up",
+        )
+    if status != "Running":
+        return DoctorCheck(
+            name="lima-vm-present",
+            severity=Severity.FAIL,
+            msg=f"Lima VM '{name}' is {status}, expected Running",
+            hint="make lima-up",
+        )
+    return DoctorCheck(
+        name="lima-vm-present",
+        severity=Severity.OK,
+        msg=f"Lima VM '{name}' Running",
+    )
+
+
+def check_lima_kvm(name: str) -> DoctorCheck:
+    """Verify /dev/kvm exists inside the guest (nested virt working)."""
+    proc = subprocess.run(
+        ["limactl", "shell", name, "--", "test", "-c", "/dev/kvm"],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        return DoctorCheck(
+            name="lima-kvm-exposed",
+            severity=Severity.FAIL,
+            msg=f"/dev/kvm missing inside {name}",
+            hint="Confirm `nestedVirtualization: true` in lima/runner.yaml; M3+ silicon + macOS 15+ required.",
+        )
+    return DoctorCheck(
+        name="lima-kvm-exposed",
+        severity=Severity.OK,
+        msg=f"/dev/kvm exposed in {name}",
+    )
+
+
+def check_lima_l1_reachability(name: str) -> DoctorCheck:
+    """Verify the four L1 services are reachable from inside the Lima guest.
+
+    Services bound to 127.0.0.1 on the host are invisible from the vmnet-shared
+    guest — that's the failure mode this check catches.
+    """
+    # Discover host gateway IP from inside the guest
+    gw_proc = subprocess.run(
+        ["limactl", "shell", name, "--", "bash", "-c",
+         "ip route | awk '/^default/{print $3; exit}'"],
+        capture_output=True, text=True, check=False,
+    )
+    gw = gw_proc.stdout.strip()
+    if not gw:
+        return DoctorCheck(
+            name="lima-l1-reachability",
+            severity=Severity.FAIL,
+            msg="could not discover host gateway from Lima",
+            hint="Check lima0 interface inside the guest; vmnet shared may be misconfigured.",
+        )
+
+    checks = [
+        ("registry", f"curl -fsS --max-time 3 http://{gw}:25000/v2/ -o /dev/null"),
+        ("postgres", f"timeout 3 bash -c 'cat < /dev/tcp/{gw}/25432'"),
+        ("dex",      f"curl -fsS --max-time 3 http://{gw}:25556/dex/.well-known/openid-configuration -o /dev/null"),
+        ("otel",     f"timeout 3 bash -c 'cat < /dev/tcp/{gw}/24317'"),
+    ]
+    failures: list[str] = []
+    for label, cmd in checks:
+        r = subprocess.run(
+            ["limactl", "shell", name, "--", "bash", "-c", cmd],
+            capture_output=True, text=True, check=False,
+        )
+        if r.returncode != 0:
+            failures.append(label)
+    if failures:
+        return DoctorCheck(
+            name="lima-l1-reachability",
+            severity=Severity.FAIL,
+            msg=f"unreachable from Lima: {', '.join(failures)} (gw={gw})",
+            hint="Check apps/infra-local/boxlite_local/services.py bindings (0.0.0.0 not 127.0.0.1).",
+        )
+    return DoctorCheck(
+        name="lima-l1-reachability",
+        severity=Severity.OK,
+        msg=f"all L1 services reachable from Lima via {gw}",
+    )
+
+
+def check_lima_runner_active(name: str) -> DoctorCheck:
+    """Verify boxlite-runner systemd unit is active inside the VM."""
+    proc = subprocess.run(
+        ["limactl", "shell", name, "--", "systemctl", "is-active", "boxlite-runner"],
+        capture_output=True, text=True, check=False,
+    )
+    state = proc.stdout.strip()
+    if state != "active":
+        return DoctorCheck(
+            name="lima-runner-active",
+            severity=Severity.WARN,
+            msg=f"boxlite-runner inside {name} is '{state}'",
+            hint="make lima-tail-logs to inspect; if a fresh VM, the install-runner provision may not have run yet.",
+        )
+    return DoctorCheck(
+        name="lima-runner-active",
+        severity=Severity.OK,
+        msg=f"boxlite-runner active in {name}",
+    )
+
+
 async def doctor(
     config: InfraConfig,
     services: dict[str, ServiceSpec],
@@ -171,6 +367,20 @@ async def doctor(
     for spec in services.values():
         for host_port, _ in spec.ports:
             checks.append(check_port_free(host_port))
+
+    # Lima-only checks (gated). Skip silently when LIMA env not set so the
+    # default doctor invocation isn't noisier for users who never touch Lima.
+    if os.environ.get("LIMA") == "1":
+        name = os.environ.get("LIMA_NAME", "boxlite-runner")
+        checks.append(check_limactl_installed())
+        if checks[-1].severity == Severity.OK:
+            checks.append(check_socket_vmnet())
+            checks.append(check_lima_sudoers())
+            checks.append(check_lima_vm_running(name))
+            if checks[-1].severity == Severity.OK:
+                checks.append(check_lima_kvm(name))
+                checks.append(check_lima_l1_reachability(name))
+                checks.append(check_lima_runner_active(name))
 
     report = DoctorReport(checks=checks)
     if strict and report.any_fail():

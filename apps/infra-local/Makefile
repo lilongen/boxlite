@@ -8,7 +8,8 @@ PY ?= python
 
 .PHONY: help up down ps doctor logs wipe itest test install load-schema up-with-schema e2e itest-all \
         stack-build stack-up stack-down stack-restart stack-status stack-logs stack-reset stack-reset-hard stack-nuke \
-        seed-init-data stack-rebuild-l1-box
+        seed-init-data stack-rebuild-l1-box \
+        lima-up lima-down lima-shell lima-status lima-rebuild lima-runner-update lima-tail-logs lima-doctor
 
 help:                  ## show this help
 	@awk -F':.*## ' '/^[a-zA-Z][a-zA-Z0-9_-]*:.*## / { printf "  %-16s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -86,3 +87,33 @@ stack-rebuild-l1-box:  ## destroy + recreate one L1 box (BOX=dex|registry|...) �
 	@if [ -z "$(BOX)" ]; then echo "usage: make stack-rebuild-l1-box BOX=<name>"; echo "e.g. BOX=dex   when login returns stale tokens"; echo "e.g. BOX=registry  when image pulls hang"; exit 1; fi
 	boxlite rm boxlite-local-$(BOX) --force
 	python -m boxlite_local up $(BOX)
+
+# ── Lima runner targets ──────────────────────────────────────────────────────
+#
+# These bring up a Lima Linux VM that hosts a linux/arm64 boxlite-runner
+# (KVM backend, production parity). See apps/infra-local/lima/README.md
+# for first-time setup (brew + sudoers).
+
+lima-up:               ## bring up the Lima runner VM (idempotent)
+	@bash scripts/lima-up.sh
+
+lima-down:             ## stop + delete the Lima runner VM (data lost)
+	@bash scripts/lima-down.sh
+
+lima-shell:            ## open a shell inside the Lima runner VM (LIMA_NAME overrides instance name)
+	@bash scripts/lima-shell.sh
+
+lima-status:           ## print Lima runner VM status
+	@limactl list "$${LIMA_NAME:-boxlite-runner}" 2>/dev/null || echo "Lima VM not present"
+
+lima-rebuild:          ## rebuild runner inside Lima, restart systemd
+	@bash scripts/lima-rebuild.sh
+
+lima-runner-update:    ## pull main + lima-rebuild
+	@bash scripts/lima-runner-update.sh
+
+lima-tail-logs:        ## tail boxlite-runner journalctl from Lima
+	@bash scripts/lima-tail-logs.sh
+
+lima-doctor:           ## run Lima preflight checks
+	@LIMA=1 $(PY) -m boxlite_local doctor
