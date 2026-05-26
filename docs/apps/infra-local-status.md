@@ -28,9 +28,21 @@
 | 服务 | 端口 | 真用途 |
 |---|---|---|
 | **NestJS API** | 3001 | 真,完整 88 migrations + 6 个 PostHog flag bootstrap = true |
-| **Go Runner**(M5 native!不走 Lima)| 3003 | 真,M5 arm64 cgo + libkrun;注册到 API,heartbeat 5s 一次 |
+| **Go Runner**(默认 M5 native,可选 Lima)| 3003 | 真,M5 arm64 cgo + libkrun;注册到 API,heartbeat 5s 一次。两种宿主任选一(见 §Runner 路径) |
 | **Go Proxy** | 4000 | 真,sandbox port-preview 流量都走这(`*-*.localhost:28080` → :4000) |
 | **Dashboard Vite dev** | 3000 | 真 React,真 OIDC,已拆 MSW |
+
+#### Runner 路径选择(M5 native vs Lima)
+
+Phase `feat/macos-lima-runner-support` 完工后,runner 有两条 host 路径,**同一时刻只能起一台**:
+
+| 路径 | 启动 | Backend | 何时用 |
+|---|---|---|---|
+| M5 native(默认)| `/tmp/boxlite-runner`,host 进程,见下方 cheatsheet | macOS HVF | 日常开发,资源开销最低 |
+| Lima(production parity) | `cd apps/infra-local && make lima-up` | Linux KVM(嵌套虚拟化),跟 EC2 同源 | 验证生产侧行为,后续 autoscaler/LimaInfraProvider 工作的前置 |
+
+切换前先关掉另一条:M5 native = `kill $(pgrep boxlite-runner)`;Lima = `make lima-down`。
+Lima 路径首次启动需要 `brew install lima socket_vmnet` + 一次 sudoers 配置,详见 [`apps/infra-local/lima/README.md`](../../apps/infra-local/lima/README.md)。
 
 ### L3 — Sandbox microVMs(用户真创建的)
 
