@@ -39,6 +39,40 @@
         }
       ]
     },
+    "copy-daemon-bin-arm64": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cp dist/apps/daemon-arm64 {projectRoot}/pkg/daemon/static/daemon-arm64"
+      },
+      "cache": true,
+      "inputs": [{ "dependentTasksOutputFiles": "**/*", "transitive": true }],
+      "outputs": ["{projectRoot}/pkg/daemon/static/daemon-arm64"],
+      "dependsOn": [
+        {
+          "target": "build-arm64",
+          "projects": "daemon"
+        }
+      ]
+    },
+    "copy-computeruse-plugin-arm64": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "{workspaceRoot}",
+        "command": "cp dist/libs/computer-use-arm64 {projectRoot}/pkg/daemon/static/boxlite-computer-use"
+      },
+      "cache": true,
+      "inputs": [
+        "{workspaceRoot}/dist/libs/computer-use-arm64",
+        { "dependentTasksOutputFiles": "**/*", "transitive": true }
+      ],
+      "outputs": ["{projectRoot}/pkg/daemon/static/boxlite-computer-use"],
+      "dependsOn": [
+        {
+          "target": "build-arm64",
+          "projects": "computer-use"
+        }
+      ]
+    },
     "build": {
       "executor": "@nx-go/nx-go:build",
       "options": {
@@ -66,6 +100,26 @@
         "flags": ["-ldflags \"-X 'github.com/boxlite-ai/runner/internal.Version=$VERSION'\""]
       },
       "dependsOn": ["copy-daemon-bin", "copy-computeruse-plugin", "check-version-env"],
+      "inputs": [
+        "goProduction",
+        "^goProduction",
+        { "env": "VERSION" },
+        { "dependentTasksOutputFiles": "**/*", "transitive": true }
+      ]
+    },
+    "_build-arm64-note": "In-Lima only producer: M5 host cannot cross-link linux/arm64 libboxlite.a easily (KVM backend, libseccomp/libssl cross-build). Phase C build-runner.sh runs this target inside the Lima VM. See docs/superpowers/specs/2026-05-26-macos-lima-runner-support-design.md §2 row 7 outcome (ii).",
+    "build-arm64": {
+      "executor": "@nx-go/nx-go:build",
+      "options": {
+        "main": "{projectRoot}/cmd/runner/main.go",
+        "outputPath": "dist/apps/runner-arm64",
+        "env": {
+          "GOARCH": "arm64",
+          "GOOS": "linux"
+        },
+        "flags": ["-ldflags \"-X 'github.com/boxlite-ai/runner/internal.Version=$VERSION'\""]
+      },
+      "dependsOn": ["copy-daemon-bin-arm64", "copy-computeruse-plugin-arm64", "check-version-env"],
       "inputs": [
         "goProduction",
         "^goProduction",
@@ -148,12 +202,36 @@
           "cp dist/apps/runner-amd64 dist/apps/runner-deb/deb/opt/boxlite/runner",
           "cp {projectRoot}/packaging/systemd/boxlite-runner.service dist/apps/runner-deb/deb/etc/systemd/system/",
           "cp {projectRoot}/packaging/deb/DEBIAN/postinst {projectRoot}/packaging/deb/DEBIAN/prerm {projectRoot}/packaging/deb/DEBIAN/postrm dist/apps/runner-deb/deb/DEBIAN/",
-          "VERSION=${VERSION:-0.1.0} envsubst < {projectRoot}/packaging/deb/DEBIAN/control > dist/apps/runner-deb/deb/DEBIAN/control",
+          "ARCH=amd64 VERSION=${VERSION:-0.1.0} envsubst < {projectRoot}/packaging/deb/DEBIAN/control > dist/apps/runner-deb/deb/DEBIAN/control",
           "dpkg-deb --build dist/apps/runner-deb/deb dist/apps/runner-deb/boxlite-runner_${VERSION:-0.0.0-dev}_amd64.deb"
         ],
         "parallel": false
       },
       "dependsOn": ["build-amd64", "check-version-env"]
+    },
+    "package-deb-arm64": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "{projectRoot}/packaging/**/*",
+        { "env": "VERSION" },
+        { "dependentTasksOutputFiles": "**/*", "transitive": true }
+      ],
+      "outputs": ["{workspaceRoot}/dist/apps/runner-deb-arm64/**/*"],
+      "options": {
+        "commands": [
+          "mkdir -p dist/apps/runner-deb-arm64/deb/opt/boxlite",
+          "mkdir -p dist/apps/runner-deb-arm64/deb/etc/systemd/system",
+          "mkdir -p dist/apps/runner-deb-arm64/deb/DEBIAN",
+          "cp dist/apps/runner-arm64 dist/apps/runner-deb-arm64/deb/opt/boxlite/runner",
+          "cp {projectRoot}/packaging/systemd/boxlite-runner.service dist/apps/runner-deb-arm64/deb/etc/systemd/system/",
+          "cp {projectRoot}/packaging/deb/DEBIAN/postinst {projectRoot}/packaging/deb/DEBIAN/prerm {projectRoot}/packaging/deb/DEBIAN/postrm dist/apps/runner-deb-arm64/deb/DEBIAN/",
+          "ARCH=arm64 VERSION=${VERSION:-0.1.0} envsubst < {projectRoot}/packaging/deb/DEBIAN/control > dist/apps/runner-deb-arm64/deb/DEBIAN/control",
+          "dpkg-deb --build dist/apps/runner-deb-arm64/deb dist/apps/runner-deb-arm64/boxlite-runner_${VERSION:-0.0.0-dev}_arm64.deb"
+        ],
+        "parallel": false
+      },
+      "dependsOn": ["build-arm64", "check-version-env"]
     },
     "push-manifest": {}
   },
