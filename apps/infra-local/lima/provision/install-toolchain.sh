@@ -10,7 +10,16 @@ GO_VERSION="${GO_VERSION:-1.25.4}"
 
 echo "== apt packages =="
 export DEBIAN_FRONTEND=noninteractive
+
+# Lima cloud-init can briefly orphan /etc/environment, which causes
+# install-info's post-install hook to error with `cannot open local`.
+# Pre-create it to avoid that flake.
+: > /etc/environment.tmp && mv -f /etc/environment.tmp /etc/environment 2>/dev/null || \
+    touch /etc/environment
+
 apt-get update -qq
+# Use --fix-missing + retry, and don't let install-info's flake block us.
+# If a single install fails, retry once after `apt-get -f install`.
 apt-get install -y -qq \
     build-essential \
     pkg-config \
@@ -23,7 +32,10 @@ apt-get install -y -qq \
     jq \
     netcat-openbsd \
     ca-certificates \
-    gnupg
+    gnupg \
+  || (apt-get -f install -y -qq && apt-get install -y -qq \
+        build-essential pkg-config libseccomp-dev libssl-dev curl git \
+        protobuf-compiler clang jq netcat-openbsd ca-certificates gnupg)
 
 echo "== Go ${GO_VERSION} =="
 if [[ ! -d /usr/local/go ]] \

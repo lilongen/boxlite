@@ -44,8 +44,24 @@ cd "$REPO"
 
 # 1. libboxlite.a (linux/arm64, KVM backend). The runner FFI binding
 #    looks for sdks/go/libboxlite.a (see sdks/go/bridge_cgo_prebuilt.go).
+#
+# Submodule init is done on the *host* before lima-up: the worktree's
+# .git is a file pointing at a path outside the mount, so `git submodule
+# update` from inside Lima can't find the worktree metadata. Host
+# operator must run `git submodule update --init --recursive` once.
+echo "== checking submodules are populated =="
+for d in src/deps/libkrun-sys/vendor/libkrun \
+         src/deps/libkrun-sys/vendor/libkrunfw \
+         src/deps/e2fsprogs-sys/vendor/e2fsprogs \
+         src/deps/bubblewrap-sys/vendor/bubblewrap; do
+    if [[ ! -f "${REPO}/${d}/Cargo.toml" && ! -f "${REPO}/${d}/Makefile" && ! -f "${REPO}/${d}/configure.ac" && ! -f "${REPO}/${d}/meson.build" ]]; then
+        echo "FATAL: submodule ${d} not populated." >&2
+        echo "On the host, run: git submodule update --init --recursive" >&2
+        exit 1
+    fi
+done
+
 echo "== building libboxlite.a (linux/arm64, KVM backend) =="
-git submodule update --init --recursive
 cargo build --release -p boxlite-c \
     --target-dir "${CARGO_TARGET_DIR}" 2>&1 | tail -10
 cp "${CARGO_TARGET_DIR}/release/libboxlite.a" "${REPO}/sdks/go/libboxlite.a"
