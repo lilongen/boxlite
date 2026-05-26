@@ -11,7 +11,7 @@ set -euo pipefail
 # but provision scripts can't see template vars at exec time — we rely on the
 # fact that the mountPoint matches /home/<host_user>.linux/boxlite, and there's
 # only one such mount.
-REPO="$(find /home -maxdepth 2 -type d -name boxlite -path '*/.linux/boxlite' | head -1)"
+REPO="$(find /home -maxdepth 3 -type d -name boxlite -path '*.linux/boxlite' 2>/dev/null | head -1)"
 if [[ -z "$REPO" || ! -f "$REPO/dist/apps/runner-arm64" ]]; then
     echo "FATAL: runner-arm64 binary not found; build-runner.sh must have run first" >&2
     echo "Looked under: /home/*.linux/boxlite/dist/apps/runner-arm64" >&2
@@ -42,8 +42,11 @@ install -m 0755 "${REPO}/dist/apps/runner-arm64" /opt/boxlite/runner
 install -m 0644 "${REPO}/apps/runner/packaging/systemd/boxlite-runner.service" \
     /etc/systemd/system/boxlite-runner.service
 
-# Required dirs (matches the unit's ReadWritePaths + WorkingDirectory)
-install -d -m 0755 /var/lib/boxlite/runner /var/log/boxlite /etc/boxlite
+# Required dirs (matches the unit's ReadWritePaths + WorkingDirectory).
+# /etc/iptables is listed in ReadWritePaths but doesn't exist by default on
+# Ubuntu cloud images; systemd refuses to start the unit ("Failed to set up
+# mount namespacing") if any ReadWritePath is missing.
+install -d -m 0755 /var/lib/boxlite/runner /var/log/boxlite /etc/boxlite /etc/iptables
 
 # Render env file. Token matches docs/apps/infra-local-status.md cheatsheet.
 # RUNNER_DOMAIN = vmnet IP, mirroring EC2's HOST_IP semantics.
