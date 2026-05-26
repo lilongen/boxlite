@@ -70,7 +70,15 @@ ls -la "${REPO}/sdks/go/libboxlite.a"
 # 2. Yarn deps (Nx needs them)
 echo "== yarn install (apps) =="
 cd "${REPO}/apps"
-yarn install --immutable 2>&1 | tail -10
+# yarn 4 walks upward looking for a project root. The repo-root package.json
+# is the BoxLite npm SDK consumer (not a workspaces declaration), so without
+# a yarn.lock in apps/, yarn 4 climbs past it to either /home/<user>/ or
+# / and errors out. Marking apps/ as its own project with an (initially
+# empty) yarn.lock anchors yarn here. yarn.lock is git-ignored at repo root.
+[[ -f "${REPO}/apps/yarn.lock" ]] || touch "${REPO}/apps/yarn.lock"
+# Drop --immutable: we generate the lockfile from scratch on each fresh VM
+# (no committed lockfile in this repo's apps/).
+yarn install 2>&1 | tail -10
 
 # 3. Build daemon + computer-use + runner (arm64).
 echo "== nx build daemon (arm64) =="
