@@ -197,8 +197,18 @@ only the Go-side patching deliverable is conditional.
 - `limactl shell default -- ls -la /dev/kvm` → device node exists.
 - `limactl shell default -- ip -4 -o addr show | grep -v 127.0.0.1` shows a
   vmnet IP (e.g. `192.168.105.X`).
-- From host, `ping <vm-ip>` works; from VM,
-  `curl http://<host-vmnet-gw-ip>:25000/v2/` reaches the L1 registry box.
+- From host, `ping <vm-ip>` works.
+- From VM, all four L1 service endpoints respond (per §8.5 — services
+  that bind only to `127.0.0.1` on the host are invisible from the
+  guest, so this is a blocker, not a nice-to-have):
+  - `curl http://<host-vmnet-gw-ip>:25000/v2/` (registry)
+  - `nc -zv <host-vmnet-gw-ip> 25432` (postgres)
+  - `curl http://<host-vmnet-gw-ip>:25556/dex/.well-known/openid-configuration` (dex)
+  - `nc -zv <host-vmnet-gw-ip> 24317` (otel gRPC)
+
+  If any of these fail because the L1 box bound only to `127.0.0.1`,
+  fix the binding in `apps/infra-local/boxlite_local/services.py`
+  before proceeding to Phase C — this is the right time to discover it.
 - `make lima-down` deletes the VM and removes vmnet leases cleanly.
 
 ### Phase C — Build artifacts inside Lima (~0.5–1 day)
@@ -257,6 +267,17 @@ only the Go-side patching deliverable is conditional.
   `limactl shell default -- ps aux | grep boxlite-shim`.
 - Open the sandbox terminal in the browser; `cat /proc/cpuinfo` inside the
   microVM reports aarch64.
+- Host-repo cleanliness (per §8.6): after a full Lima build cycle,
+  `git status` on the host shows no unexpected new/modified files —
+  all `nx` / Go / Cargo build state stayed inside `/home/${USER}.linux/`
+  via `NX_CACHE_DIRECTORY` / `GOMODCACHE` / `CARGO_TARGET_DIR`
+  overrides, never on the mounted source tree.
+- Double-registration behavior (per §7.3): start both the M5-native
+  runner and the Lima runner; observe whether the API tolerates two
+  runners registered against the same scheduler or whether sandbox
+  creation breaks. Record the finding in the PR description so the
+  "only start one at a time" operational rule is either confirmed
+  necessary or relaxed.
 
 ### Phase E — Doctor + docs + cleanup (~0.5 day)
 
@@ -394,10 +415,11 @@ interchangeable); cross linker availability (`aarch64-linux-gnu-ld` not
 shipped by Brew's `musl-cross`); sys-lib cross-build for
 libseccomp/libssl/protobuf.
 
-**Mitigation:** Phase A's DoD permits a fallback — if 2 hours of
-investigation does not yield a working cross-link, drop the M5-side build
-claim and let Phase C own all builds. The branch goal (Lima runner
-running) is unaffected.
+**Mitigation:** Phase A's DoD is the binary criterion from §2 row 7 —
+either M5-side cross-link works, or the arm64 Nx targets are documented
+as "in-Lima only" and Phase C is the sole producer. No "I tried for
+N hours" half-states. The branch goal (Lima runner running) is
+unaffected by which side of that binary lands.
 
 ### 8.2 vmnet shared requires `socket_vmnet` + `sudoers`
 
