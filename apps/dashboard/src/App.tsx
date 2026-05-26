@@ -61,8 +61,6 @@ import { ApiProvider } from './providers/ApiProvider'
 import { RegionsProvider } from './providers/RegionsProvider'
 import { SandboxSessionProvider } from './providers/SandboxSessionProvider'
 import { SvixProvider } from './providers/SvixProvider'
-import RunnerOps from './pages/admin/RunnerOps'
-import { RequireAdmin } from './components/auth/RequireAdmin'
 
 // Simple redirection components for external URLs
 const DocsRedirect = () => {
@@ -284,10 +282,6 @@ function App() {
               </RequiredPermissionsOrganizationPageWrapper>
             </RequiredFeatureFlagWrapper>
           }
-        />
-        <Route
-          path={getRouteSubPath(RoutePath.ADMIN_RUNNER_OPS)}
-          element={<RequireAdmin><RunnerOps /></RequireAdmin>}
         />
         <Route
           path={getRouteSubPath(RoutePath.ACCOUNT_SETTINGS)}

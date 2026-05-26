@@ -7,7 +7,6 @@
 import { ApiProperty, ApiSchema } from '@nestjs/swagger'
 import { User } from '../user.entity'
 import { UserPublicKeyDto } from './user-public-key.dto'
-import { SystemRole } from '../enums/system-role.enum'
 
 @ApiSchema({ name: 'User' })
 export class UserDto {
@@ -27,13 +26,6 @@ export class UserDto {
   email: string
 
   @ApiProperty({
-    description: 'System role',
-    enum: SystemRole,
-    enumName: 'SystemRole',
-  })
-  role: SystemRole
-
-  @ApiProperty({
     description: 'User public keys',
     type: [UserPublicKeyDto],
   })
@@ -49,7 +41,6 @@ export class UserDto {
       id: user.id,
       name: user.name,
       email: user.email,
-      role: user.role,
       publicKeys: user.publicKeys.map(UserPublicKeyDto.fromUserPublicKey),
       createdAt: user.createdAt,
     }
