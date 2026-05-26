@@ -25,6 +25,7 @@ apt-get install -y -qq \
     pkg-config \
     libseccomp-dev \
     libssl-dev \
+    libcap-dev \
     curl \
     git \
     protobuf-compiler \
@@ -33,9 +34,20 @@ apt-get install -y -qq \
     netcat-openbsd \
     ca-certificates \
     gnupg \
+    meson \
+    ninja-build \
+    autoconf \
+    automake \
+    libtool \
+    gettext \
+    gperf \
+    texinfo \
+    bison \
+    flex \
   || (apt-get -f install -y -qq && apt-get install -y -qq \
-        build-essential pkg-config libseccomp-dev libssl-dev curl git \
-        protobuf-compiler clang jq netcat-openbsd ca-certificates gnupg)
+        build-essential pkg-config libseccomp-dev libssl-dev libcap-dev curl git \
+        protobuf-compiler clang jq netcat-openbsd ca-certificates gnupg \
+        meson ninja-build autoconf automake libtool gettext gperf texinfo bison flex)
 
 echo "== Go ${GO_VERSION} =="
 if [[ ! -d /usr/local/go ]] \
