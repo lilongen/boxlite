@@ -45,11 +45,11 @@
     "build-arm64": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "./hack/computer-use/build-computer-use-arm64.sh"
+        "command": "if [ -n \"$SKIP_COMPUTER_USE_BUILD\" ]; then echo 'Skipping computer-use build (SKIP_COMPUTER_USE_BUILD=$SKIP_COMPUTER_USE_BUILD)'; mkdir -p dist/libs && touch dist/libs/computer-use-arm64; else ./hack/computer-use/build-computer-use-arm64.sh; fi"
       },
       "configurations": {
         "production": {
-          "command": "if [ -n \"$SKIP_COMPUTER_USE_BUILD\" ]; then echo 'Skipping computer-use build'; else ./hack/computer-use/build-computer-use-arm64.sh; fi"
+          "command": "if [ -n \"$SKIP_COMPUTER_USE_BUILD\" ]; then echo 'Skipping computer-use build'; mkdir -p dist/libs && touch dist/libs/computer-use-arm64; else ./hack/computer-use/build-computer-use-arm64.sh; fi"
         }
       },
       "inputs": [
