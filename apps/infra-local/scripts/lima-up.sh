@@ -37,10 +37,10 @@ fi
 LOG="${TMPDIR:-/tmp}/lima-up-${LIMA_NAME}.log"
 if [[ -n "$current_status" ]]; then
   echo "Lima VM '${LIMA_NAME}' exists (status: $current_status), starting (detached, log → $LOG)..."
-  ( nohup limactl start "$LIMA_NAME" </dev/null >"$LOG" 2>&1 & )
+  ( nohup limactl start --timeout=60m "$LIMA_NAME" </dev/null >"$LOG" 2>&1 & )
 else
   echo "Creating Lima VM '${LIMA_NAME}' from $LIMA_YAML (detached, log → $LOG)"
-  ( nohup limactl start --name="$LIMA_NAME" --tty=false "$LIMA_YAML" </dev/null >"$LOG" 2>&1 & )
+  ( nohup limactl start --timeout=60m --name="$LIMA_NAME" --tty=false "$LIMA_YAML" </dev/null >"$LOG" 2>&1 & )
 fi
 
 # Give limactl a moment to register the instance, then surface state.
