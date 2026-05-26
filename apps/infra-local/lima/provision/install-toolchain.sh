@@ -44,10 +44,11 @@ apt-get install -y -qq \
     texinfo \
     bison \
     flex \
+    patchelf \
   || (apt-get -f install -y -qq && apt-get install -y -qq \
         build-essential pkg-config libseccomp-dev libssl-dev libcap-dev curl git \
         protobuf-compiler clang jq netcat-openbsd ca-certificates gnupg \
-        meson ninja-build autoconf automake libtool gettext gperf texinfo bison flex)
+        meson ninja-build autoconf automake libtool gettext gperf texinfo bison flex patchelf)
 
 echo "== Go ${GO_VERSION} =="
 if [[ ! -d /usr/local/go ]] \
