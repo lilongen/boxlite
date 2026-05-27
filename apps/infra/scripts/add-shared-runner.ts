@@ -29,6 +29,8 @@ import { fileURLToPath } from "url";
 
 import { Command } from "commander";
 import { addSharedRunner, RUNNER_NAME_REGEX } from "../lib/add-shared-runner-lib";
+import { createInfraProvider } from "../lib/infra-provider/factory";
+import type { IInfraProvider, InfraProviderConfig } from "../lib/infra-provider/types";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "../../..");
@@ -286,6 +288,53 @@ async function confirmTty(prompt: string): Promise<boolean> {
   });
 }
 
+// ─── provider selection ──────────────────────────────────────────────────────
+
+// Default 'aws' keeps existing CLI behaviour (EC2). 'local' spawns a native
+// boxlite-runner process — primarily for infra-local testing; the API service
+// (RunnerOpsService) is the main local entry point, this is for parity.
+function buildProvider(args: Args): IInfraProvider {
+  const kind = (process.env.BOXLITE_RUNNER_OPS_PROVIDER ?? "aws").toLowerCase();
+  let cfg: InfraProviderConfig;
+  if (kind === "local") {
+    const runnerBin = process.env.BOXLITE_RUNNER_OPS_LOCAL_RUNNER_BIN;
+    if (!runnerBin) {
+      throw new Error(
+        "BOXLITE_RUNNER_OPS_PROVIDER=local requires BOXLITE_RUNNER_OPS_LOCAL_RUNNER_BIN",
+      );
+    }
+    cfg = {
+      kind: "local",
+      runnerBin,
+      dyld: process.env.BOXLITE_RUNNER_OPS_LOCAL_DYLD,
+      homeRoot: process.env.BOXLITE_RUNNER_OPS_LOCAL_HOME_ROOT ?? "~/.boxlite-runner-ops",
+      portBase: parseInt(process.env.BOXLITE_RUNNER_OPS_LOCAL_PORT_BASE ?? "3100", 10),
+      insecureRegistries:
+        process.env.BOXLITE_RUNNER_OPS_LOCAL_INSECURE_REGISTRIES ?? "127.0.0.1:25000",
+      terminateGraceSec: parseInt(
+        process.env.BOXLITE_RUNNER_OPS_LOCAL_TERMINATE_GRACE_SEC ?? "15",
+        10,
+      ),
+      apiUrl: args.apiUrl,
+      backupBucket: process.env.BOXLITE_RUNNER_OPS_BACKUP_BUCKET,
+      backupEndpoint: process.env.BOXLITE_RUNNER_OPS_BACKUP_ENDPOINT,
+      backupRegion: process.env.BOXLITE_RUNNER_OPS_BACKUP_REGION ?? "us-east-1",
+      backupAccessKey: process.env.BOXLITE_RUNNER_OPS_BACKUP_ACCESS_KEY,
+      backupSecretKey: process.env.BOXLITE_RUNNER_OPS_BACKUP_SECRET_KEY,
+    };
+  } else {
+    cfg = {
+      kind: "aws",
+      awsRegion: AWS_REGION,
+      subnetId: args.subnetId,
+      instanceProfileName: args.instanceProfileName,
+      registryUrl: args.registryUrl,
+      cargoTomlPath: CARGO_TOML,
+    };
+  }
+  return createInfraProvider(cfg);
+}
+
 // ─── main ───────────────────────────────────────────────────────────────────
 
 async function main(): Promise<number> {
@@ -343,22 +392,26 @@ async function main(): Promise<number> {
     result.flush();
 
     // Run generator and loop over events, manually to capture the return value
-    const gen = addSharedRunner({
-      apiUrl: args.apiUrl,
-      adminToken: args.adminToken,
-      awsRegion: AWS_REGION,
-      name: runnerName,
-      apiKey: runnerApiKey,
-      regionId: args.regionId,
-      instanceType: args.instanceType,
-      diskGb: args.rootDiskGB,
-      withBackupSidecar: args.withBackupSidecar,
-      registryUrl: args.registryUrl,
-      subnetId: args.subnetId,
-      instanceProfileName: args.instanceProfileName,
-      timeoutSec: args.timeout,
-      noWait: args.noWait,
-    })
+    const provider = buildProvider(args);
+    const gen = addSharedRunner(
+      {
+        apiUrl: args.apiUrl,
+        adminToken: args.adminToken,
+        awsRegion: AWS_REGION,
+        name: runnerName,
+        apiKey: runnerApiKey,
+        regionId: args.regionId,
+        instanceType: args.instanceType,
+        diskGb: args.rootDiskGB,
+        withBackupSidecar: args.withBackupSidecar,
+        registryUrl: args.registryUrl,
+        subnetId: args.subnetId,
+        instanceProfileName: args.instanceProfileName,
+        timeoutSec: args.timeout,
+        noWait: args.noWait,
+      },
+      provider,
+    )
 
     let genNext = await gen.next()
     let finalResult

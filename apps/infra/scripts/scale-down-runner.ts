@@ -40,6 +40,8 @@ import { fileURLToPath } from "url";
 
 import { Command } from "commander";
 import { scaleDownRunner } from "../lib/scale-down-runner-lib";
+import { createInfraProvider } from "../lib/infra-provider/factory";
+import type { IInfraProvider, InfraProviderConfig } from "../lib/infra-provider/types";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AWS_REGION = process.env.AWS_REGION ?? "ap-southeast-1";
@@ -304,6 +306,36 @@ async function confirmTty(prompt: string): Promise<boolean> {
   });
 }
 
+// ─── provider selection ──────────────────────────────────────────────────────
+
+// Default 'aws' (terminate EC2 by tag:RunnerId) keeps existing behaviour.
+// 'local' terminates the native boxlite-runner process + removes its home dir.
+function buildProvider(args: Args): IInfraProvider {
+  const kind = (process.env.BOXLITE_RUNNER_OPS_PROVIDER ?? "aws").toLowerCase();
+  let cfg: InfraProviderConfig;
+  if (kind === "local") {
+    const runnerBin = process.env.BOXLITE_RUNNER_OPS_LOCAL_RUNNER_BIN ?? "boxlite-runner";
+    cfg = {
+      kind: "local",
+      runnerBin,
+      dyld: process.env.BOXLITE_RUNNER_OPS_LOCAL_DYLD,
+      homeRoot: process.env.BOXLITE_RUNNER_OPS_LOCAL_HOME_ROOT ?? "~/.boxlite-runner-ops",
+      portBase: parseInt(process.env.BOXLITE_RUNNER_OPS_LOCAL_PORT_BASE ?? "3100", 10),
+      insecureRegistries:
+        process.env.BOXLITE_RUNNER_OPS_LOCAL_INSECURE_REGISTRIES ?? "127.0.0.1:25000",
+      terminateGraceSec: parseInt(
+        process.env.BOXLITE_RUNNER_OPS_LOCAL_TERMINATE_GRACE_SEC ?? "15",
+        10,
+      ),
+      apiUrl: args.apiUrl,
+      backupRegion: process.env.BOXLITE_RUNNER_OPS_BACKUP_REGION ?? "us-east-1",
+    };
+  } else {
+    cfg = { kind: "aws", awsRegion: args.awsRegion };
+  }
+  return createInfraProvider(cfg);
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<number> {
@@ -371,19 +403,23 @@ async function main(): Promise<number> {
     }
 
     // Run the generator for stages 2-10
-    const gen = scaleDownRunner({
-      apiUrl: args.apiUrl,
-      adminToken: args.adminToken,
-      awsRegion: args.awsRegion,
-      runnerId: args.id,
-      restartStopped: args.restartStopped,
-      skipEc2Terminate: args.skipEc2Terminate,
-      dryRun: false, // We already checked dryRun above
-      maxWaitBackupSec: args.maxWaitBackup,
-      maxWaitStopSec: args.maxWaitStop,
-      maxWaitArchiveSec: args.maxWaitArchive,
-      maxWaitStartSec: args.maxWaitStart,
-    });
+    const provider = buildProvider(args);
+    const gen = scaleDownRunner(
+      {
+        apiUrl: args.apiUrl,
+        adminToken: args.adminToken,
+        awsRegion: args.awsRegion,
+        runnerId: args.id,
+        restartStopped: args.restartStopped,
+        skipEc2Terminate: args.skipEc2Terminate,
+        dryRun: false, // We already checked dryRun above
+        maxWaitBackupSec: args.maxWaitBackup,
+        maxWaitStopSec: args.maxWaitStop,
+        maxWaitArchiveSec: args.maxWaitArchive,
+        maxWaitStartSec: args.maxWaitStart,
+      },
+      provider,
+    );
 
     let genNext = await gen.next();
     let finalResult: any = null;
