@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026 BoxLite AI
 
-import {
-  EC2Client,
-  DescribeInstancesCommand,
-  TerminateInstancesCommand,
-} from '@aws-sdk/client-ec2'
 import type {
   ProgressEvent,
   ScaleDownOpts,
   ScaleDownResult,
 } from './runner-ops-types.js'
 import { OperationAbortedError } from './runner-ops-types.js'
+import type { IInfraProvider } from './infra-provider/types.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -253,29 +249,11 @@ async function waitSandboxState(
   )
 }
 
-async function findEc2ByRunnerId(awsRegion: string, runnerId: string): Promise<string[]> {
-  const ec2 = new EC2Client({ region: awsRegion })
-  const r = await ec2.send(
-    new DescribeInstancesCommand({
-      Filters: [
-        { Name: 'tag:RunnerId', Values: [runnerId] },
-        { Name: 'instance-state-name', Values: ['pending', 'running', 'stopping', 'stopped'] },
-      ],
-    }),
-  )
-  return (r.Reservations ?? []).flatMap((r) => r.Instances ?? []).map((i) => i.InstanceId!).filter(Boolean)
-}
-
-async function terminateEc2(awsRegion: string, instanceIds: string[]): Promise<void> {
-  if (!instanceIds.length) return
-  const ec2 = new EC2Client({ region: awsRegion })
-  await ec2.send(new TerminateInstancesCommand({ InstanceIds: instanceIds }))
-}
-
 // ─── Main generator ─────────────────────────────────────────────────────────
 
 export async function* scaleDownRunner(
   opts: ScaleDownOpts,
+  provider: IInfraProvider,
 ): AsyncGenerator<ProgressEvent, ScaleDownResult, void> {
   const start = Date.now()
   checkAborted(opts.signal)
@@ -334,6 +312,15 @@ export async function* scaleDownRunner(
     yield { type: 'data', key: 'sourceRegion', value: src.region }
     yield { type: 'data', key: 'peerCount', value: peers.length }
     yield { type: 'data', key: 'peers', value: peers }
+
+    // #3: a scale-down with no peer in the region cannot migrate the boxes.
+    // Assert BEFORE the dryRun early-return so dryRun correctly reports the
+    // runner is not scalable-down (FAILED), not a misleading SUCCESS.
+    if (peers.length === 0) {
+      throw new Error(
+        `no peer SHARED runner (ready, schedulable) in region ${src.region}; cannot scale down (boxes have nowhere to migrate)`,
+      )
+    }
 
     if (opts.dryRun) {
       return {
@@ -579,22 +566,16 @@ export async function* scaleDownRunner(
       throw new Error(`DELETE runner: ${msg}`)
     }
 
-    // ─── [10/10] Terminate EC2 ────────────────────────────────────────────
-    if (opts.skipEc2Terminate) {
-      yield { type: 'stage', stage: 10, total: 10, label: '--skip-ec2-terminate: leaving EC2(s) running' }
+    // ─── [10/10] Terminate runner host (via IInfraProvider) ───────────────
+    const skip = opts.skipTerminate ?? opts.skipEc2Terminate ?? false
+    if (skip) {
+      yield { type: 'stage', stage: 10, total: 10, label: 'skipTerminate: leaving runner host running' }
     } else {
-      yield { type: 'stage', stage: 10, total: 10, label: `Terminate EC2 by tag:RunnerId=${src.id}` }
+      yield { type: 'stage', stage: 10, total: 10, label: `Terminate runner host for ${src.id}` }
       checkAborted(opts.signal)
-      const ec2Ids = await findEc2ByRunnerId(opts.awsRegion, src.id)
-      if (ec2Ids.length === 0) {
-        yield { type: 'log', line: '(no matching EC2 found)' }
-      } else {
-        yield { type: 'log', line: `terminating: ${ec2Ids.join(', ')}` }
-        await terminateEc2(opts.awsRegion, ec2Ids)
-        for (const id of ec2Ids) {
-          ec2InstancesTerminated.push(id)
-        }
-      }
+      await provider.terminateRunner(src.id)
+      ec2InstancesTerminated.push(src.id)
+      yield { type: 'log', line: `→ host terminated for runner ${src.id}` }
     }
 
     // Determine which sandboxes migrated vs archived

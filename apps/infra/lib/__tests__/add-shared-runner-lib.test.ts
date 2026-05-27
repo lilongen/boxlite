@@ -39,7 +39,7 @@ describe('addSharedRunner generator', () => {
     const provider = fakeProvider()
     const events: ProgressEvent[] = []
     const gen = addSharedRunner(
-      { apiUrl: 'http://api', adminToken: 'tok', awsRegion: 'us-east-1', name: 'r', timeoutSec: 5 },
+      { apiUrl: 'http://api', adminToken: 'tok', awsRegion: 'us-east-1', name: 'r', apiKey: 'k', timeoutSec: 5 },
       provider,
     )
     let result

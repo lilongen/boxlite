@@ -44,7 +44,10 @@ export interface ScaleDownOpts {
   awsRegion: string
   runnerId: string
   restartStopped?: boolean
+  /** @deprecated provider-agnostic alias is `skipTerminate`; kept for back-compat */
   skipEc2Terminate?: boolean
+  /** Skip the IInfraProvider.terminateRunner step (leave the host running). */
+  skipTerminate?: boolean
   dryRun?: boolean
   maxWaitBackupSec?: number
   maxWaitStopSec?: number
