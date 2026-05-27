@@ -142,7 +142,9 @@ describe('scaleDownRunner generator', () => {
         result = n.value
         break
       }
-      events.push(n.value)
+      // n is a yield (not the return) past the guard; non-strict tsconfig can't
+      // discriminate IteratorResult on `done`, so assert the narrowed type.
+      events.push(n.value as ProgressEvent)
       if (events.length > 20) break
     }
     expect(result?.runnerId).toBe('r-1')

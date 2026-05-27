@@ -46,7 +46,9 @@ describe('addSharedRunner generator', () => {
     while (true) {
       const n = await gen.next()
       if (n.done) { result = n.value; break }
-      events.push(n.value)
+      // n is a yield (not the return) past the guard; non-strict tsconfig can't
+      // discriminate IteratorResult on `done`, so assert the narrowed type.
+      events.push(n.value as ProgressEvent)
       if (events.length > 50) break
     }
     expect(provider.provisionRunner).toHaveBeenCalledTimes(1)

@@ -2,7 +2,9 @@ import { describe, it, expect, jest, beforeEach } from '@jest/globals'
 
 // ESM mocking: `jest.mock` doesn't intercept static imports under ts-jest/ESM —
 // use `jest.unstable_mockModule` + dynamic import of the SUT (see local.test.ts).
-const send = jest.fn()
+// Typed so `.mockResolvedValueOnce(...)` accepts the EC2 response shapes
+// (an untyped jest.fn() infers a `never` argument under @jest/globals).
+const send = jest.fn<(...args: any[]) => Promise<any>>()
 jest.unstable_mockModule('@aws-sdk/client-ec2', () => ({
   EC2Client: jest.fn(() => ({ send })),
   RunInstancesCommand: jest.fn((x: unknown) => ({ __cmd: 'RunInstances', input: x })),

@@ -5,6 +5,22 @@
 **Owner:** TBD
 **Priority:** Medium — blocks proper TDD discipline for any new unit tests; manual e2e currently covers behavioural verification.
 
+## Status update (2026-05-27) — largely resolved
+
+The jest *infrastructure* is restored; what remains are individual spec-code bugs.
+
+- **Root `tsconfig.base.json`** — now a tracked symlink → `apps/tsconfig.base.json`, so the TS5083 error is gone.
+- **Root `jest.preset.js`** — restored (resolves `@nx/jest/preset` from `apps/node_modules`). `nx test api` no longer errors on the missing preset; self-contained specs run green (e.g. `snapshot-ref.util.spec.ts` 5/5, `runner-ops.service.spec.ts` 3/3).
+- **`apps/infra` provider/lib tests** (Task 2/3/4/6 of the localprocess-provider plan) — were never green: `jest.config.cjs` left ts-jest on `module=commonjs` (no top-level `await`), an untyped mock inferred `never`, and two lib tests pushed a union into a `ProgressEvent[]`. Fixed (ESM+target pinned in `jest.config.cjs`; typed the aws send mock; asserted the narrowed yield type). **All 5 suites green (15 tests).**
+- **`uuid` ESM transform** — jest ignored `node_modules`, so specs transitively importing `uuid` (ESM-only `dist-node`) failed to parse. Fixed with `transformIgnorePatterns: ['/node_modules/(?!uuid/)']` in `apps/api/jest.config.ts`.
+
+**Still broken (spec-code bugs, not infra — separate follow-up):**
+- `runner-ops-job-store.spec.ts` — `import { getRedisToken } from '@nestjs-modules/ioredis'` (no such export).
+- `runner-ops.controller.spec.ts` — fails to run (own import/setup bug).
+- `runner.service.spec.ts` — was uuid-blocked; re-verify after the uuid fix, then triage any residual.
+
+These are individual test-authoring fixes for the runner-ops admin work, not the jest base config; track/triage them separately.
+
 ## Symptom
 
 ```
