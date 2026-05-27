@@ -346,7 +346,11 @@ const configuration = {
     // local
     localRunnerBin: process.env.BOXLITE_RUNNER_OPS_LOCAL_RUNNER_BIN,
     localDyld: process.env.BOXLITE_RUNNER_OPS_LOCAL_DYLD,
-    localHomeRoot: process.env.BOXLITE_RUNNER_OPS_LOCAL_HOME_ROOT || '~/.boxlite-runner-ops',
+    // Must be under $HOME (the macOS microVM won't boot from /private/tmp) AND
+    // short: the runner builds box unix-socket paths here and macOS caps them at
+    // SUN_LEN (104). On restore the box dir uses the full 36-char sandbox UUID,
+    // so `~/.blr/<12>/boxes/<36>/sockets/ready.sock` ≈ 95 chars — keep it terse.
+    localHomeRoot: process.env.BOXLITE_RUNNER_OPS_LOCAL_HOME_ROOT || '~/.blr',
     localPortBase: parseInt(process.env.BOXLITE_RUNNER_OPS_LOCAL_PORT_BASE || '3100', 10),
     localInsecureRegistries:
       process.env.BOXLITE_RUNNER_OPS_LOCAL_INSECURE_REGISTRIES || '127.0.0.1:25000',

@@ -78,6 +78,16 @@ describe('LocalProcessInfraProvider', () => {
     expect(metaStore['/tmp/rop/r1/meta.json']).toContain('"pid": 4242')
   })
 
+  it('uses a 12-char runnerId prefix for the home dir (macOS SUN_LEN budget)', async () => {
+    const p = new LocalProcessInfraProvider(cfg)
+    const longId = '074464f0-4753-4c34-9252-e1bdca2716fb' // 36-char UUID
+    await p.provisionRunner({ runnerId: longId, apiKey: 'k', apiUrl: 'http://localhost:3009', regionId: 'us' })
+    // meta.json is written under the home dir — its path reveals the dir name.
+    const metaPath = writeFileSyncMock.mock.calls[0][0] as string
+    expect(metaPath).toBe('/tmp/rop/074464f0-475/meta.json')
+    expect(metaPath).not.toContain(longId) // full UUID would overflow the socket path
+  })
+
   it('appends /api to BOXLITE_API_URL when the base lacks it (and is idempotent)', async () => {
     const p = new LocalProcessInfraProvider(cfg)
     // base WITHOUT /api → runner env must gain it

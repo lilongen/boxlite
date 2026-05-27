@@ -33,8 +33,14 @@ export class LocalProcessInfraProvider implements IInfraProvider {
   private homeRoot(): string {
     return this.cfg.homeRoot.replace(/^~(?=$|\/)/, homedir())
   }
+  // The runner builds box unix-socket paths under BOXLITE_HOME_DIR, e.g.
+  // <home>/boxes/<boxId>/sockets/ready.sock (~38 chars). macOS caps unix
+  // socket paths at SUN_LEN (104). A full 36-char runnerId under a homedir
+  // root overflows, so the per-runner dir uses a 12-char runnerId prefix —
+  // deterministic (terminate/describe re-derive it) and collision-free for the
+  // handful of local runners this provider manages.
   private home(runnerId: string): string {
-    return join(this.homeRoot(), runnerId)
+    return join(this.homeRoot(), runnerId.slice(0, 12))
   }
   private metaPath(runnerId: string): string {
     return join(this.home(runnerId), 'meta.json')
@@ -123,12 +129,16 @@ export class LocalProcessInfraProvider implements IInfraProvider {
 
   private async pickFreePort(): Promise<number> {
     const base = this.cfg.portBase
+    // Probe the wildcard interface (no host arg), matching how the runner binds
+    // its API server. Binding 127.0.0.1 specifically can spuriously succeed on
+    // macOS while another process already holds the IPv6/dual-stack wildcard,
+    // which then makes the runner fail with "port already in use".
     const tryPort = (port: number): Promise<boolean> =>
       new Promise((res) => {
         const srv = createServer()
         srv.once('error', () => res(false))
         srv.once('listening', () => srv.close(() => res(true)))
-        srv.listen(port, '127.0.0.1')
+        srv.listen(port)
       })
     for (let p = base; p < base + 200; p++) {
       if (await tryPort(p)) return p

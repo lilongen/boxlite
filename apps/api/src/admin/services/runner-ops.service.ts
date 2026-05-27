@@ -56,7 +56,7 @@ export class RunnerOpsService {
         kind: 'local',
         runnerBin,
         dyld: str('runnerOps.localDyld'),
-        homeRoot: str('runnerOps.localHomeRoot') ?? '~/.boxlite-runner-ops',
+        homeRoot: str('runnerOps.localHomeRoot') ?? '~/.blr',
         portBase: num('runnerOps.localPortBase') ?? 3100,
         insecureRegistries: str('runnerOps.localInsecureRegistries') ?? '127.0.0.1:25000',
         terminateGraceSec: num('runnerOps.localTerminateGraceSec') ?? 15,

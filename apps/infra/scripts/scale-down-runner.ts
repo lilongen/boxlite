@@ -319,7 +319,7 @@ function buildProvider(args: Args): IInfraProvider {
       kind: "local",
       runnerBin,
       dyld: process.env.BOXLITE_RUNNER_OPS_LOCAL_DYLD,
-      homeRoot: process.env.BOXLITE_RUNNER_OPS_LOCAL_HOME_ROOT ?? "~/.boxlite-runner-ops",
+      homeRoot: process.env.BOXLITE_RUNNER_OPS_LOCAL_HOME_ROOT ?? "~/.blr",
       portBase: parseInt(process.env.BOXLITE_RUNNER_OPS_LOCAL_PORT_BASE ?? "3100", 10),
       insecureRegistries:
         process.env.BOXLITE_RUNNER_OPS_LOCAL_INSECURE_REGISTRIES ?? "127.0.0.1:25000",
