@@ -196,6 +196,10 @@ apps/apps
 apps/.env
 # contains secrets (encryption key, runner token)
 apps/api/.env
+# per-environment env files (.env-local = local infra, .env-dev = dev.boxlite.ai); both hold secrets
+apps/api/.env-local
+apps/api/.env-dev
+apps/api/.env-*
 # SWC config from attempted compile switch (reverted to tsc, file is dead)
 apps/api/.swcrc
 # 115 MB, prebuilt from upstream releases
