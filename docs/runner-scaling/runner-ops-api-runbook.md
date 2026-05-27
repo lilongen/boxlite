@@ -113,6 +113,46 @@ Redis job -> lock -> poll without touching EC2. A no-AWS add still proves the
 chain: the job moves to `RUNNING` then `FAILED` at the EC2 step, but the
 entry-point mechanics are covered.
 
+## Local provider (`provider=local`, no AWS) — full add + scale-down
+
+`BOXLITE_RUNNER_OPS_PROVIDER=local` swaps EC2 for `LocalProcessInfraProvider`,
+which spawns a native `boxlite-runner` per runner. This runs the **complete**
+add + scale-down (including box migration) on a single host — used for the
+2026-05-27 E2E (see [`local-scale-down-e2e-2026-05-27.md`](./local-scale-down-e2e-2026-05-27.md)
+for the full walkthrough, build steps, and findings).
+
+`apps/api/.env` for local:
+
+```
+BOXLITE_RUNNER_OPS_PROVIDER=local
+BOXLITE_RUNNER_OPS_API_URL=http://localhost:3009        # NO /api suffix — the lib appends /api/admin/runners itself
+BOXLITE_RUNNER_OPS_ADMIN_TOKEN=local-dev-admin-key
+BOXLITE_RUNNER_OPS_LOCAL_RUNNER_BIN=/tmp/boxlite-runner-backup   # backup-capable runner (see E2E doc)
+BOXLITE_RUNNER_OPS_LOCAL_HOME_ROOT=~/.blr               # keep SHORT — macOS SUN_LEN overflows on restore with a long root
+BOXLITE_RUNNER_OPS_LOCAL_PORT_BASE=3100
+BOXLITE_RUNNER_OPS_LOCAL_INSECURE_REGISTRIES=127.0.0.1:25000
+BOXLITE_RUNNER_OPS_BACKUP_BUCKET=boxlite
+BOXLITE_RUNNER_OPS_BACKUP_ENDPOINT=http://127.0.0.1:29000
+BOXLITE_RUNNER_OPS_BACKUP_REGION=us-east-1
+BOXLITE_RUNNER_OPS_BACKUP_ACCESS_KEY=minioadmin
+BOXLITE_RUNNER_OPS_BACKUP_SECRET_KEY=minioadmin
+# BOXLITE_RUNNER_OPS_LOCAL_DYLD intentionally unset — the runner statically links libboxlite
+```
+
+Add-via-wrapper flow (same endpoints as the AWS path, no AWS creds):
+
+```bash
+TOK=local-dev-admin-key; API=http://localhost:3009
+# add a runner; the provider spawns boxlite-runner on PORT_BASE+ and writes ~/.blr/<id-prefix>/meta.json
+curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+     -d '{"name":"e2e-runner-a","regionId":"us"}' "$API/api/admin/runner-ops/add-shared"
+# poll the returned job id until status=SUCCESS (→ runner READY), then scale-down as in the AWS flow.
+```
+
+Two config gotchas the AWS path doesn't hit: the `/api`-suffix rule on
+`*_API_URL` and the short `*_HOME_ROOT` requirement. Both are detailed in the
+E2E doc's Findings.
+
 ## CLI equivalents
 
 The same libs back two CLIs (identical behaviour, no HTTP):
