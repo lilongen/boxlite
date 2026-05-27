@@ -39,7 +39,33 @@ minute. Observed even with **zero local boxes** (a fresh runner crashed during a
 snapshot pull, before any box existed), so it is not triggered by box-info
 content.
 
-## Likely root cause
+## Investigation update (2026-05-27) — localized to the #495 post-and-drain async API
+
+Systematic-debugging pass. **Production risk is LOW**, contrary to the initial worry:
+
+- The crash lives in the **post-and-drain async-callback machinery** introduced by
+  `d8bcaadd` "feat(c-ffi): post-and-drain async callback C API (phase 2) (#495)"
+  (2026-05-09): the `drainLoop` goroutine calls `boxlite_runtime_drain`, C invokes
+  the Go `//export` callbacks during that call, coordinated through
+  `activeHandles` / `claimHandleForDispatch` (`sdks/go/runtime.go`, `bridge_callback.go`).
+- **Regression window:** `git merge-base --is-ancestor d8bcaadd sdks/go/v0.8.x..v0.9.4` → NOT an ancestor; only **v0.9.5 contains #495**. So the **vanilla production runner (sdks/go v0.8.2) predates this machinery** and uses the old direct-callback path — it is **not affected**. Only a runner built from this tree (v0.9.5/HEAD) hits the crash. This explains why dev/prod runners are stable.
+- ⇒ It is **NOT a debug-vs-release issue** — a release libboxlite would not fix it (the defect is in the v0.9.5 Go/FFI drain machinery, present in both debug and release).
+
+**Ruled out:**
+- The int-token handle machinery — `handleToPtr` (reinterprets the `cgo.Handle` bits, not `&h`), `registerHandleForDispatch` (plain `sync.Map` store, returns handle unchanged). Handle values are small ints, never in the heap arena.
+- Empty-`ListInfo`-only stress: 16 goroutines × 5000 calls, `runtime.GC()` every iteration, built with `GOEXPERIMENT=cgocheck2` (full cgo pointer checks) — **clean, no crash, no cgocheck violation.** So plain concurrent empty ListInfo is not the trigger; a specific GC-vs-drain interleaving (and/or non-empty results / mixed event types) is needed.
+- Go-vs-header ABI skew: Go cgo and the C side share the same `sdks/c/include/boxlite.h`.
+
+**Not yet done (blocked on reproduction):** could not reproduce in isolation, so
+the exact defective line is unconfirmed. Next data-gathering options:
+(a) soak the v0.9.5 debug runner under load with `GOTRACEBACK=crash` to capture the
+full multi-goroutine dump + the bad-pointer address;
+(b) audit the #495 machinery end-to-end — `drainLoop` + Rust `sdks/c/src/event_queue.rs`
+(how queued events carry the payload / `user_data` / callback-fn pointers across the
+drain boundary, and the `OwnedFfiPtr` lifetimes);
+(c) defer — prod (v0.8.2) is unaffected, so this only gates shipping v0.9.5 runners.
+
+## Likely root cause (original notes)
 
 `runtime.adjustpointers: invalid pointer found on stack` fires from the GC stack
 scanner while the goroutine stack is being copied (`copystack`) — and
