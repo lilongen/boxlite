@@ -15,6 +15,11 @@ import type {
   ScaleDownResult,
   ProgressEvent,
 } from '../../../../infra/lib/runner-ops-types.js'
+import { createInfraProvider } from '../../../../infra/lib/infra-provider/factory.js'
+import type {
+  IInfraProvider,
+  InfraProviderConfig,
+} from '../../../../infra/lib/infra-provider/types.js'
 import { TypedConfigService } from '../../config/typed-config.service'
 import { RunnerOpsJobStore } from './runner-ops-job-store'
 
@@ -24,11 +29,55 @@ const SCALE_LOCK_TTL = 3_600
 @Injectable()
 export class RunnerOpsService {
   private readonly logger = new Logger(RunnerOpsService.name)
+  private readonly provider: IInfraProvider
 
   constructor(
     private readonly store: RunnerOpsJobStore,
     private readonly configService: TypedConfigService,
-  ) {}
+  ) {
+    this.provider = createInfraProvider(this.buildProviderConfig())
+    this.logger.log(`runner-ops provider: ${this.configService.get('runnerOps.provider') ?? 'aws'}`)
+  }
+
+  /** Reads `runnerOps.*` config into the discriminated InfraProviderConfig. */
+  private buildProviderConfig(): InfraProviderConfig {
+    const str = (k: string) => this.configService.get(k as never) as string | undefined
+    const num = (k: string) => this.configService.get(k as never) as number | undefined
+    const provider = str('runnerOps.provider') ?? 'aws'
+
+    if (provider === 'local') {
+      const runnerBin = str('runnerOps.localRunnerBin')
+      if (!runnerBin) {
+        throw new Error(
+          'runnerOps.provider=local requires BOXLITE_RUNNER_OPS_LOCAL_RUNNER_BIN (path to boxlite-runner binary)',
+        )
+      }
+      return {
+        kind: 'local',
+        runnerBin,
+        dyld: str('runnerOps.localDyld'),
+        homeRoot: str('runnerOps.localHomeRoot') ?? '~/.boxlite-runner-ops',
+        portBase: num('runnerOps.localPortBase') ?? 3100,
+        insecureRegistries: str('runnerOps.localInsecureRegistries') ?? '127.0.0.1:25000',
+        terminateGraceSec: num('runnerOps.localTerminateGraceSec') ?? 15,
+        apiUrl: this.configService.getOrThrow('runnerOps.apiUrl') as string,
+        backupBucket: str('runnerOps.backupBucket'),
+        backupEndpoint: str('runnerOps.backupEndpoint'),
+        backupRegion: str('runnerOps.backupRegion') ?? 'us-east-1',
+        backupAccessKey: str('runnerOps.backupAccessKey'),
+        backupSecretKey: str('runnerOps.backupSecretKey'),
+      }
+    }
+
+    return {
+      kind: 'aws',
+      awsRegion: this.configService.getOrThrow('runnerOps.awsRegion') as string,
+      subnetId: str('runnerOps.subnetId'),
+      instanceProfileName: str('runnerOps.instanceProfileName'),
+      registryUrl: str('runnerOps.registryUrl'),
+      cargoTomlPath: str('runnerOps.cargoTomlPath'),
+    }
+  }
 
   async startAddSharedRunner(input: {
     name?: string
@@ -120,13 +169,13 @@ export class RunnerOpsService {
   protected runAddSharedRunner(
     opts: AddSharedRunnerOpts,
   ): AsyncGenerator<ProgressEvent, AddSharedRunnerResult, void> {
-    return addSharedRunner(opts)
+    return addSharedRunner(opts, this.provider)
   }
 
   protected runScaleDownRunner(
     opts: ScaleDownOpts,
   ): AsyncGenerator<ProgressEvent, ScaleDownResult, void> {
-    return scaleDownRunner(opts)
+    return scaleDownRunner(opts, this.provider)
   }
 
   private async pumpAdd(id: string, opts: AddSharedRunnerOpts): Promise<void> {

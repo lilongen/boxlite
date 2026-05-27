@@ -333,12 +333,33 @@ const configuration = {
   failedSnapshotRunnerRetentionHours: parseInt(process.env.FAILED_SNAPSHOT_RUNNER_RETENTION_HOURS || '3', 10),
   buildInfoSnapshotRunnerStalenessDays: parseInt(process.env.BUILDINFO_SNAPSHOT_RUNNER_STALENESS_DAYS || '7', 10),
   runnerOps: {
+    // 'aws' (EC2 hosts) | 'local' (native boxlite-runner processes on this host)
+    provider: process.env.BOXLITE_RUNNER_OPS_PROVIDER || 'aws',
     apiUrl: process.env.BOXLITE_RUNNER_OPS_API_URL || 'http://localhost:3000',
     adminToken: process.env.BOXLITE_RUNNER_OPS_ADMIN_TOKEN,
     awsRegion: process.env.BOXLITE_RUNNER_OPS_AWS_REGION || 'ap-southeast-1',
+    // aws
     subnetId: process.env.BOXLITE_RUNNER_OPS_SUBNET_ID,
     instanceProfileName: process.env.BOXLITE_RUNNER_OPS_INSTANCE_PROFILE,
     registryUrl: process.env.BOXLITE_RUNNER_OPS_REGISTRY_URL,
+    cargoTomlPath: process.env.BOXLITE_RUNNER_OPS_CARGO_TOML,
+    // local
+    localRunnerBin: process.env.BOXLITE_RUNNER_OPS_LOCAL_RUNNER_BIN,
+    localDyld: process.env.BOXLITE_RUNNER_OPS_LOCAL_DYLD,
+    localHomeRoot: process.env.BOXLITE_RUNNER_OPS_LOCAL_HOME_ROOT || '~/.boxlite-runner-ops',
+    localPortBase: parseInt(process.env.BOXLITE_RUNNER_OPS_LOCAL_PORT_BASE || '3100', 10),
+    localInsecureRegistries:
+      process.env.BOXLITE_RUNNER_OPS_LOCAL_INSECURE_REGISTRIES || '127.0.0.1:25000',
+    localTerminateGraceSec: parseInt(
+      process.env.BOXLITE_RUNNER_OPS_LOCAL_TERMINATE_GRACE_SEC || '15',
+      10,
+    ),
+    // backup (used by the local runner launch; aws sets these via user-data)
+    backupBucket: process.env.BOXLITE_RUNNER_OPS_BACKUP_BUCKET,
+    backupEndpoint: process.env.BOXLITE_RUNNER_OPS_BACKUP_ENDPOINT,
+    backupRegion: process.env.BOXLITE_RUNNER_OPS_BACKUP_REGION || 'us-east-1',
+    backupAccessKey: process.env.BOXLITE_RUNNER_OPS_BACKUP_ACCESS_KEY,
+    backupSecretKey: process.env.BOXLITE_RUNNER_OPS_BACKUP_SECRET_KEY,
   },
 }
 
