@@ -82,6 +82,28 @@ The real-AWS run validated everything up to the runner-side backup:
   (sst.config.ts). Dev has **`boxlite-volume-backups-dev`** for this.
 - AND the runner binary must actually implement backup (this is the blocker).
 
+## VALIDATED 2026-05-27 (测试快路: custom-built runner) — migration works end to end
+
+Built a backup-capable `boxlite-runner-linux-amd64` from current source on a
+throwaway x86_64 Ubuntu EC2 (`make guest` + `make runtime` + `cargo build
+--release -p boxlite-c` + `go build` the runner — full from-source, ~5 min on
+c8i.4xlarge), uploaded to `s3://boxlite-volume-backups-dev/e2e/`, SSM-swapped it
+onto two fresh dev runners r1/r2, and re-ran the migration. Result: **PASS** —
+`backup COMPLETED` → `ARCHIVED` → `STARTED on r2` for both boxes; `sandbox.id`
+preserved; r1 deleted + EC2 terminated; the two pre-existing boxes on r2
+undisturbed; **nothing ever scheduled onto `default`** (cordoned during the
+window, restored after). So the scale-down + migration logic AND the runner-side
+backup are correct from current source — the only gap is the released artifact.
+
+**Two real gaps surfaced while doing this (worth fixing for the 正路):**
+1. **`--with-backup-sidecar` / `--backups-bucket` are NOT wired through
+   `AwsInfraProvider` to the user-data.** Even with both flags, the launched
+   runner's systemd unit had **no `BOXLITE_BACKUPS_BUCKET`** (so `CreateBackup`
+   errors "bucket not set"). Had to add the env via SSM. The IInfraProvider
+   refactor dropped the backup-flag passthrough; restore it in
+   `apps/infra/lib/infra-provider/aws.ts` → `buildRunnerUserData(... withBackupSidecar, backupsBucket)`.
+2. The released runner lacks backup (root cause below) — the actual blocker.
+
 ## Fix — 正路 (re-cut the runner release from current source)
 
 The runner release is a **two-stage chain** (`build-runner-binary.yml`): it
