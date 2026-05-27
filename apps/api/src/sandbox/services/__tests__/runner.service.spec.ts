@@ -31,8 +31,10 @@ describe('RunnerService.findAllFull regionType filter', () => {
   })
 
   it('returns all runners when no filter is provided', async () => {
-    const runner1 = { id: 'r-1', region: 'region-1' } as Runner
-    const runner2 = { id: 'r-2', region: 'region-2' } as Runner
+    // findAllFull maps createdAt/updatedAt via .toISOString(), so the fixtures
+    // must carry those Dates (a bare {id,region} crashes the mapper).
+    const runner1 = { id: 'r-1', region: 'region-1', createdAt: new Date(), updatedAt: new Date() } as Runner
+    const runner2 = { id: 'r-2', region: 'region-2', createdAt: new Date(), updatedAt: new Date() } as Runner
 
     mockRunnerRepository.find.mockResolvedValue([runner1, runner2])
     mockRegionService.findByIds.mockResolvedValue([
@@ -47,8 +49,10 @@ describe('RunnerService.findAllFull regionType filter', () => {
   })
 
   it('filters runners by regionType when filter is provided', async () => {
-    const runner1 = { id: 'r-1', region: 'region-1' } as Runner
-    const runner2 = { id: 'r-2', region: 'region-2' } as Runner
+    // findAllFull maps createdAt/updatedAt via .toISOString(), so the fixtures
+    // must carry those Dates (a bare {id,region} crashes the mapper).
+    const runner1 = { id: 'r-1', region: 'region-1', createdAt: new Date(), updatedAt: new Date() } as Runner
+    const runner2 = { id: 'r-2', region: 'region-2', createdAt: new Date(), updatedAt: new Date() } as Runner
 
     mockRunnerRepository.find.mockResolvedValue([runner1, runner2])
     mockRegionService.findByIds.mockResolvedValue([
@@ -64,8 +68,10 @@ describe('RunnerService.findAllFull regionType filter', () => {
   })
 
   it('returns empty array when filter excludes all runners', async () => {
-    const runner1 = { id: 'r-1', region: 'region-1' } as Runner
-    const runner2 = { id: 'r-2', region: 'region-2' } as Runner
+    // findAllFull maps createdAt/updatedAt via .toISOString(), so the fixtures
+    // must carry those Dates (a bare {id,region} crashes the mapper).
+    const runner1 = { id: 'r-1', region: 'region-1', createdAt: new Date(), updatedAt: new Date() } as Runner
+    const runner2 = { id: 'r-2', region: 'region-2', createdAt: new Date(), updatedAt: new Date() } as Runner
 
     mockRunnerRepository.find.mockResolvedValue([runner1, runner2])
     mockRegionService.findByIds.mockResolvedValue([

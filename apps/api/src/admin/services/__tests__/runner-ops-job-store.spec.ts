@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing'
-import { getRedisToken } from '@nestjs-modules/ioredis'
+import { getRedisConnectionToken } from '@nestjs-modules/ioredis'
 import Redis from 'ioredis-mock'
 import { RunnerOpsJobStore } from '../runner-ops-job-store'
 
@@ -12,7 +12,7 @@ describe('RunnerOpsJobStore', () => {
     const mod = await Test.createTestingModule({
       providers: [
         RunnerOpsJobStore,
-        { provide: getRedisToken('default'), useValue: redis },
+        { provide: getRedisConnectionToken('default'), useValue: redis },
       ],
     }).compile()
     store = mod.get(RunnerOpsJobStore)

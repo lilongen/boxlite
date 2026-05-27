@@ -6,7 +6,7 @@
 
 import { Test, TestingModule } from '@nestjs/testing'
 import { INestApplication, ExecutionContext } from '@nestjs/common'
-import * as request from 'supertest'
+import request from 'supertest'
 import { CombinedAuthGuard } from '../../../auth/combined-auth.guard'
 import { RunnerOpsController } from '../runner-ops.controller'
 import { RunnerOpsService } from '../../services/runner-ops.service'

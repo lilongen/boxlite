@@ -14,12 +14,12 @@ The jest *infrastructure* is restored; what remains are individual spec-code bug
 - **`apps/infra` provider/lib tests** (Task 2/3/4/6 of the localprocess-provider plan) — were never green: `jest.config.cjs` left ts-jest on `module=commonjs` (no top-level `await`), an untyped mock inferred `never`, and two lib tests pushed a union into a `ProgressEvent[]`. Fixed (ESM+target pinned in `jest.config.cjs`; typed the aws send mock; asserted the narrowed yield type). **All 5 suites green (15 tests).**
 - **`uuid` ESM transform** — jest ignored `node_modules`, so specs transitively importing `uuid` (ESM-only `dist-node`) failed to parse. Fixed with `transformIgnorePatterns: ['/node_modules/(?!uuid/)']` in `apps/api/jest.config.ts`.
 
-**Still broken (spec-code bugs, not infra — separate follow-up):**
-- `runner-ops-job-store.spec.ts` — `import { getRedisToken } from '@nestjs-modules/ioredis'` (no such export).
-- `runner-ops.controller.spec.ts` — fails to run (own import/setup bug).
-- `runner.service.spec.ts` — was uuid-blocked; re-verify after the uuid fix, then triage any residual.
+**Resolved spec-code bugs (2026-05-27, second pass):**
+- `runner-ops-job-store.spec.ts` — `getRedisToken` → `getRedisConnectionToken` (the actual `@nestjs-modules/ioredis` export). Green.
+- `runner-ops.controller.spec.ts` — installed `supertest`/`@types/supertest` (devDeps) and switched to a default import (`import request from 'supertest'`; the v6 types export a namespace, not a callable). Green.
+- `runner.service.spec.ts` — the mock runners lacked `createdAt`/`updatedAt`, so `findAllFull`'s `.toISOString()` mapper crashed; added the Date fixtures. Green.
 
-These are individual test-authoring fixes for the runner-ops admin work, not the jest base config; track/triage them separately.
+All known apps/api runner-ops + runner.service + snapshot-ref specs now pass. No outstanding jest issues for the runner-ops work.
 
 ## Symptom
 
