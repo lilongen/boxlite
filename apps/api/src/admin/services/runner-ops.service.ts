@@ -121,6 +121,7 @@ export class RunnerOpsService {
     runnerId: string,
     input: {
       restartStopped?: boolean
+      skipTerminate?: boolean
       skipEc2Terminate?: boolean
       dryRun?: boolean
       maxWaitBackupSec?: number
@@ -144,6 +145,7 @@ export class RunnerOpsService {
       awsRegion: this.configService.getOrThrow('runnerOps.awsRegion') as string,
       runnerId,
       restartStopped: input.restartStopped,
+      skipTerminate: input.skipTerminate,
       skipEc2Terminate: input.skipEc2Terminate,
       dryRun: input.dryRun,
       maxWaitBackupSec: input.maxWaitBackupSec,

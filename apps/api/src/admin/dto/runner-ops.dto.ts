@@ -40,7 +40,14 @@ export class ScaleDownRequestDto {
   @ApiPropertyOptional() @IsOptional() @IsBoolean()
   restartStopped?: boolean
 
-  @ApiPropertyOptional({ description: 'Debug: do not terminate EC2 after deleting runner row' })
+  @ApiPropertyOptional({ description: 'Debug: do not terminate the runner host after deleting runner row' })
+  @IsOptional() @IsBoolean()
+  skipTerminate?: boolean
+
+  @ApiPropertyOptional({
+    deprecated: true,
+    description: 'Deprecated alias of skipTerminate (kept for back-compat)',
+  })
   @IsOptional() @IsBoolean()
   skipEc2Terminate?: boolean
 
