@@ -1,0 +1,76 @@
+import { describe, it, expect, jest, beforeEach } from '@jest/globals'
+
+const spawnMock = jest.fn()
+const mkdirSyncMock = jest.fn()
+const writeFileSyncMock = jest.fn()
+const rmSyncMock = jest.fn()
+const openSyncMock = jest.fn(() => 7)
+let metaStore: Record<string, string> = {}
+
+jest.mock('child_process', () => ({ spawn: spawnMock }))
+jest.mock('fs', () => ({
+  mkdirSync: mkdirSyncMock,
+  writeFileSync: (p: string, data: string) => { writeFileSyncMock(p, data); metaStore[p] = data },
+  readFileSync: (p: string) => metaStore[p],
+  existsSync: (p: string) => p in metaStore,
+  rmSync: rmSyncMock,
+  openSync: openSyncMock,
+}))
+jest.mock('net', () => ({
+  createServer: () => {
+    const handlers: Record<string, () => void> = {}
+    return {
+      once: (ev: string, cb: () => void) => { handlers[ev] = cb },
+      listen: () => { setImmediate(() => handlers['listening']?.()) },
+      close: (cb: () => void) => cb(),
+    }
+  },
+}))
+
+import { LocalProcessInfraProvider } from '../local'
+import type { LocalProviderConfig } from '../types'
+
+const cfg: LocalProviderConfig = {
+  kind: 'local', runnerBin: '/tmp/boxlite-runner-backup', dyld: '/dyld',
+  homeRoot: '/tmp/rop', portBase: 3100, insecureRegistries: '127.0.0.1:25000',
+  terminateGraceSec: 1, apiUrl: 'http://localhost:3009/api',
+  backupBucket: 'boxlite', backupEndpoint: 'http://127.0.0.1:29000', backupRegion: 'us-east-1',
+  backupAccessKey: 'minioadmin', backupSecretKey: 'minioadmin',
+}
+
+beforeEach(() => { metaStore = {}; spawnMock.mockReset().mockReturnValue({ pid: 4242, unref: jest.fn() }); writeFileSyncMock.mockReset() })
+
+describe('LocalProcessInfraProvider', () => {
+  it('provisionRunner spawns detached with backup env + writes meta', async () => {
+    const p = new LocalProcessInfraProvider(cfg)
+    const r = await p.provisionRunner({ runnerId: 'r1', apiKey: 'tok', apiUrl: 'http://localhost:3009/api', regionId: 'us' })
+    expect(r.endpoint).toBe('http://127.0.0.1:3100')
+    const [bin, args, opts] = spawnMock.mock.calls[0] as any[]
+    expect(bin).toBe('/tmp/boxlite-runner-backup')
+    expect(opts.detached).toBe(true)
+    expect(opts.env.BOXLITE_HOME_DIR).toBe('/tmp/rop/r1')
+    expect(opts.env.BOXLITE_RUNNER_TOKEN).toBe('tok')
+    expect(opts.env.BOXLITE_BACKUPS_BUCKET).toBe('boxlite')
+    expect(opts.env.AWS_ACCESS_KEY_ID).toBe('minioadmin')
+    expect(metaStore['/tmp/rop/r1/meta.json']).toContain('"pid": 4242')
+  })
+
+  it('describeRunner reports alive based on pid', async () => {
+    const p = new LocalProcessInfraProvider(cfg)
+    await p.provisionRunner({ runnerId: 'r2', apiKey: 'k', apiUrl: 'a', regionId: 'us' })
+    const killSpy = jest.spyOn(process, 'kill').mockImplementation(() => true as any)
+    expect((await p.describeRunner('r2')).alive).toBe(true)
+    killSpy.mockImplementation(() => { throw new Error('ESRCH') })
+    expect((await p.describeRunner('r2')).alive).toBe(false)
+    killSpy.mockRestore()
+  })
+
+  it('terminateRunner kills pid + removes home', async () => {
+    const p = new LocalProcessInfraProvider(cfg)
+    await p.provisionRunner({ runnerId: 'r3', apiKey: 'k', apiUrl: 'a', regionId: 'us' })
+    const killSpy = jest.spyOn(process, 'kill').mockImplementation((_pid, sig) => { if (sig === 0) throw new Error('gone'); return true as any })
+    await p.terminateRunner('r3')
+    expect(rmSyncMock).toHaveBeenCalledWith('/tmp/rop/r3', expect.objectContaining({ recursive: true }))
+    killSpy.mockRestore()
+  })
+})
