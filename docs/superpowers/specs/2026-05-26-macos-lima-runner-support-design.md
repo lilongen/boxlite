@@ -3,7 +3,36 @@
 > Date: 2026-05-26
 > Branch: `feat/macos-lima-runner-support`
 > Author: solo (michael.li@polygala.ai)
-> Status: Approved (verbal), pending spec-review-loop
+> Status: **PAUSED at ~92% on 2026-05-27.** See §13 Postscript.
+
+## 0. Postscript — paused 2026-05-27
+
+The branch was paused after Phases A–C completed end-to-end and Phase D
+reached "runner systemd unit active(running) inside Lima, BoxLite runtime
+initialized, all background services up." The only un-verified bit was the
+runner's self-registration heartbeat against the host's NestJS API
+(which happened to be down on the host at the time).
+
+**Why paused, not finished:**
+Multiple `boxlite-runner` processes can run side-by-side on the same M5
+host by setting different `BOXLITE_HOME_DIR` (and different `API_PORT`)
+per process. That covers the "multi-runner-host" simulation that was
+Lima's main pull for the autoscaler / `LimaInfraProvider` follow-on work,
+without the 30-min provision pipeline, virtiofs / GOPROXY / cloud-init
+quirks, and 13 apt packages Lima brings.
+
+**Production parity** (KVM-backed libkrun vs HVF) remains the one thing
+the native path can't give. If a real prod-side bug needs KVM-parity
+local reproduction, resume this branch — everything below still applies
+verbatim, and the gotchas from the live debug pass are captured in
+`memory/lima-runner-lessons.md` for future-self.
+
+**To resume:** start host NestJS API, runner auto-registers within 5 s,
+then run the §11 verification checklist. See `memory/project_lima_runner_paused.md`
+for the exact next-steps list. ~10 minutes of work between "API up" and
+"branch 100% verified."
+
+---
 
 ## 1. Goal
 
