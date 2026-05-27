@@ -105,3 +105,5 @@ require (
 )
 
 replace github.com/boxlite-ai/boxlite/libs/api-client-go => ../api-client-go
+
+replace github.com/boxlite-ai/boxlite/sdks/go => ../../sdks/go
