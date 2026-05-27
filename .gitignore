@@ -213,3 +213,9 @@ regions-*.png
 runners-*.png
 term-*.png
 test-*.png
+
+# Local-only scratch / decrypted secrets (never commit)
+docs/tmp/
+
+# Local Docker build caches (cargo registry, target volume mirrors)
+.docker-cache/

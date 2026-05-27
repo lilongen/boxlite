@@ -323,13 +323,16 @@ impl BoxliteRuntime {
     ///
     /// Creates a new box with a new ID from archived disk images and configuration.
     /// Pass `name=None` to keep the imported box unnamed.
+    /// Pass `id=Some(...)` to force a specific box id (e.g. when migrating with
+    /// an external `sandbox.id == box.id` invariant); `None` mints a fresh id.
     /// Support depends on backend capabilities (local backends implement import).
     pub async fn import_box(
         &self,
         archive: BoxArchive,
         name: Option<String>,
+        id: Option<String>,
     ) -> BoxliteResult<LiteBox> {
-        self.backend.import_box(archive, name).await
+        self.backend.import_box(archive, name, id).await
     }
 
     // ========================================================================

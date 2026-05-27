@@ -17,13 +17,27 @@ use crate::runtime::types::BoxStatus;
 
 /// Import a box from a `.boxlite` archive.
 ///
-/// Creates a new box with a new ID from archived disk images and
-/// configuration. The imported box starts in `Stopped` state.
+/// Creates a box from archived disk images and configuration. When `id` is
+/// `Some(...)`, the imported box uses that id verbatim (subject to
+/// [`crate::runtime::id::BoxID::parse`] validation); otherwise a fresh id is
+/// minted. The imported box starts in `Stopped` state.
 pub(crate) async fn import_box(
     runtime: &Arc<RuntimeImpl>,
     archive: BoxArchive,
     name: Option<String>,
+    id: Option<String>,
 ) -> BoxliteResult<LiteBox> {
+    // Resolve optional caller-supplied id eagerly so we fail fast on bad input.
+    let id_override = match id {
+        Some(s) => Some(crate::runtime::id::BoxID::parse(&s).ok_or_else(|| {
+            BoxliteError::InvalidArgument(format!(
+                "Invalid box id '{}' for import (must be URL-safe, \u{2264}128 chars)",
+                s
+            ))
+        })?),
+        None => None,
+    };
+
     let t0 = std::time::Instant::now();
     let archive_path = archive.path().to_path_buf();
     if !archive_path.exists() {
@@ -58,7 +72,7 @@ pub(crate) async fn import_box(
     });
 
     let litebox = runtime
-        .provision_box(staging_dir, name, options, BoxStatus::Stopped)
+        .provision_box(staging_dir, name, options, BoxStatus::Stopped, id_override)
         .await?;
 
     tracing::info!(

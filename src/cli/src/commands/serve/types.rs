@@ -160,6 +160,12 @@ pub(super) struct CloneRequest {
 pub(super) struct ImportQuery {
     #[serde(default)]
     pub name: Option<String>,
+    /// Optional caller-supplied box id. When set, the imported box uses this
+    /// id verbatim instead of minting a fresh one. Required by callers that
+    /// must keep an external `sandbox.id == box.id` invariant
+    /// (e.g. BoxLite scale-down sidecar flow).
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 // ============================================================================

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use boxlite::{BoxArchive, BoxOptions, BoxliteRuntime};
+use boxlite::{BoxArchive, BoxOptions, BoxliteOptions, BoxliteRuntime};
 use pyo3::prelude::*;
 
 use crate::box_handle::PyBox;
@@ -19,7 +19,10 @@ pub(crate) struct PyBoxlite {
 impl PyBoxlite {
     #[new]
     fn new(options: PyOptions) -> PyResult<Self> {
-        let runtime = BoxliteRuntime::new(options.into_core()?).map_err(map_err)?;
+        let core_opts = options.into_core()?;
+        // Executable-owned logging init (the library no longer auto-installs a subscriber).
+        let _ = boxlite::init_logging_for(&core_opts.home_dir);
+        let runtime = BoxliteRuntime::new(core_opts).map_err(map_err)?;
 
         Ok(Self {
             runtime: Arc::new(runtime),
@@ -28,6 +31,10 @@ impl PyBoxlite {
 
     #[staticmethod]
     fn default() -> PyResult<Self> {
+        // Executable-owned logging init (the library no longer auto-installs a
+        // subscriber). The default runtime uses `BoxliteOptions::default()`, so
+        // we mirror its home_dir for the log location.
+        let _ = boxlite::init_logging_for(&BoxliteOptions::default().home_dir);
         let runtime = BoxliteRuntime::default_runtime();
         Ok(Self {
             runtime: Arc::new(runtime.clone()),
@@ -56,7 +63,9 @@ impl PyBoxlite {
 
     #[staticmethod]
     fn init_default(options: PyOptions) -> PyResult<()> {
-        BoxliteRuntime::init_default_runtime(options.into_core()?).map_err(map_err)
+        let core_opts = options.into_core()?;
+        let _ = boxlite::init_logging_for(&core_opts.home_dir);
+        BoxliteRuntime::init_default_runtime(core_opts).map_err(map_err)
     }
 
     #[pyo3(signature = (options, name=None))]
@@ -197,17 +206,20 @@ impl PyBoxlite {
     ///
     /// Returns a Box handle for the imported box.
     /// If `name` is omitted, the imported box remains unnamed.
-    #[pyo3(signature = (archive_path, name=None))]
+    /// If `id` is set, the imported box uses that id verbatim instead of
+    /// minting a fresh one (subject to BoxID validation).
+    #[pyo3(signature = (archive_path, name=None, id=None))]
     fn import_box<'py>(
         &self,
         py: Python<'py>,
         archive_path: String,
         name: Option<String>,
+        id: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let runtime = Arc::clone(&self.runtime);
         let archive = BoxArchive::new(archive_path);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let handle = runtime.import_box(archive, name).await.map_err(map_err)?;
+            let handle = runtime.import_box(archive, name, id).await.map_err(map_err)?;
             Ok(PyBox {
                 handle: Arc::new(handle),
             })

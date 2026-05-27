@@ -334,6 +334,20 @@ char *boxlite_box_id(CBoxHandle *handle);
 
 void boxlite_box_free(CBoxHandle *handle);
 
+// Export a stopped box to a portable `.boxlite` archive on disk.
+//
+// Blocks until the archive is written. Caller MUST stop the box first
+// (export refuses to operate on a running VM to avoid corrupt disks).
+//
+// # Safety
+// * `handle` must be a valid `BoxHandle*` returned by `boxlite_get` /
+//   `boxlite_create_box`.
+// * `dest_path` must be a NUL-terminated UTF-8 C string.
+// * `out_error` must be NULL or a valid `CBoxliteError*` writable by the caller.
+enum BoxliteErrorCode boxlite_box_export(CBoxHandle *handle,
+                                         const char *dest_path,
+                                         CBoxliteError *out_error);
+
 enum BoxliteErrorCode boxlite_copy_into(CBoxHandle *handle,
                                         const char *host_src,
                                         const char *guest_dst,
@@ -642,6 +656,26 @@ void boxlite_runtime_free(CBoxliteRuntime *runtime);
 //
 // Returns the number of dispatched events, or `-1` on error.
 int boxlite_runtime_drain(CBoxliteRuntime *runtime, int timeout_ms, CBoxliteError *out_error);
+
+// Import a `.boxlite` archive synchronously and return a handle to the new box.
+//
+// * `archive_path` — NUL-terminated UTF-8 path to a `.boxlite` archive on disk.
+// * `name` — optional NUL-terminated UTF-8 box name. NULL = leave unnamed.
+// * `id` — optional NUL-terminated UTF-8 box id. NULL = mint a fresh id.
+//   When provided, the imported box uses this id verbatim (must pass
+//   `BoxID::parse` validation: URL-safe, ≤128 chars).
+// * `out_handle` — receives the new `CBoxHandle*` on success.
+//
+// # Safety
+// All pointer arguments must be valid as documented. `out_handle` must be
+// non-NULL. The caller takes ownership of the returned handle and MUST free it
+// with `boxlite_box_free` (or transfer ownership downstream).
+enum BoxliteErrorCode boxlite_runtime_import_box(CBoxliteRuntime *runtime,
+                                                 const char *archive_path,
+                                                 const char *name,
+                                                 const char *id,
+                                                 CBoxHandle **out_handle,
+                                                 CBoxliteError *out_error);
 
 void boxlite_free_string(char *s);
 

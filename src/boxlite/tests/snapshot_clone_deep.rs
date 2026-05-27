@@ -1345,7 +1345,7 @@ async fn test_export_import_preserves_file_contents() {
         .unwrap();
 
     let imported = runtime
-        .import_box(archive, Some("imported-data".to_string()))
+        .import_box(archive, Some("imported-data".to_string()), None)
         .await
         .unwrap();
 
@@ -1416,6 +1416,7 @@ async fn test_double_import_from_same_archive() {
         .import_box(
             boxlite::BoxArchive::new(archive_path.clone()),
             Some("imp-1".to_string()),
+            None,
         )
         .await
         .unwrap();
@@ -1424,6 +1425,7 @@ async fn test_double_import_from_same_archive() {
         .import_box(
             boxlite::BoxArchive::new(archive_path),
             Some("imp-2".to_string()),
+            None,
         )
         .await
         .unwrap();
@@ -1470,7 +1472,7 @@ async fn test_imported_box_has_no_snapshots() {
         .unwrap();
 
     let imported = runtime
-        .import_box(archive, Some("no-snaps".to_string()))
+        .import_box(archive, Some("no-snaps".to_string()), None)
         .await
         .unwrap();
 
@@ -1506,7 +1508,7 @@ async fn test_export_import_cloned_box() {
         .unwrap();
 
     let imported = runtime
-        .import_box(archive, Some("imp-clone".to_string()))
+        .import_box(archive, Some("imp-clone".to_string()), None)
         .await
         .unwrap();
 
@@ -1537,7 +1539,7 @@ async fn test_import_validates_no_backing_references() {
         .unwrap();
 
     let imported = runtime
-        .import_box(archive, Some("secure-imp".to_string()))
+        .import_box(archive, Some("secure-imp".to_string()), None)
         .await
         .unwrap();
 
@@ -1593,7 +1595,7 @@ async fn test_export_import_box_with_custom_options() {
         .unwrap();
 
     let imported = runtime
-        .import_box(archive, Some("imp-custom".to_string()))
+        .import_box(archive, Some("imp-custom".to_string()), None)
         .await
         .unwrap();
 
@@ -2084,7 +2086,7 @@ async fn test_export_under_write_pressure_with_data_check() {
 
     // Import and verify marker
     let imported = runtime
-        .import_box(archive, Some("imp-stress".to_string()))
+        .import_box(archive, Some("imp-stress".to_string()), None)
         .await
         .unwrap();
 
@@ -2297,7 +2299,7 @@ async fn test_clone_and_export_same_box_sequentially() {
 
     // Import
     let imported = runtime
-        .import_box(archive, Some("seq-import".to_string()))
+        .import_box(archive, Some("seq-import".to_string()), None)
         .await
         .unwrap();
 
@@ -2485,7 +2487,7 @@ async fn test_export_import_preserves_symlinks() {
         .unwrap();
 
     let imported = runtime
-        .import_box(archive, Some("symlink-imp".to_string()))
+        .import_box(archive, Some("symlink-imp".to_string()), None)
         .await
         .unwrap();
 
@@ -2728,7 +2730,7 @@ async fn test_archive_roundtrip_checksum_integrity() {
 
     // Import should succeed (checksums validated internally)
     let imported = runtime
-        .import_box(archive, Some("checksum-imp".to_string()))
+        .import_box(archive, Some("checksum-imp".to_string()), None)
         .await
         .unwrap();
 

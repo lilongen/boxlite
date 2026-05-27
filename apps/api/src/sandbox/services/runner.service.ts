@@ -143,7 +143,7 @@ export class RunnerService {
     }
   }
 
-  async findAllFull(): Promise<RunnerFullDto[]> {
+  async findAllFull(filter?: { regionType?: RegionType }): Promise<RunnerFullDto[]> {
     const runners = await this.runnerRepository.find()
 
     const regionIds = new Set(runners.map((runner) => runner.region))
@@ -154,7 +154,15 @@ export class RunnerService {
       regionTypeMap.set(region.id, region.regionType)
     })
 
-    return runners.map((runner) => RunnerFullDto.fromRunner(runner, regionTypeMap.get(runner.region)))
+    const filtered = runners.filter((runner) => {
+      const regionType = regionTypeMap.get(runner.region)
+      if (filter?.regionType && regionType !== filter.regionType) {
+        return false
+      }
+      return true
+    })
+
+    return filtered.map((runner) => RunnerFullDto.fromRunner(runner, regionTypeMap.get(runner.region)))
   }
 
   async findAllByRegion(regionId: string): Promise<RunnerDto[]> {
