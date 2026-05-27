@@ -2,25 +2,15 @@
 // Copyright (c) 2026 BoxLite AI
 
 import * as crypto from 'crypto'
-import {
-  EC2Client,
-  RunInstancesCommand,
-  DescribeImagesCommand,
-  DescribeInstancesCommand,
-  type _InstanceType,
-} from '@aws-sdk/client-ec2'
 import type {
   AddSharedRunnerOpts,
   AddSharedRunnerResult,
   ProgressEvent,
 } from './runner-ops-types.js'
 import { OperationAbortedError } from './runner-ops-types.js'
-import { buildRunnerUserData } from './runner-user-data.js'
+import type { IInfraProvider } from './infra-provider/types.js'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-
-const UBUNTU_OWNER_ID = '099720109477'
-const UBUNTU_NAME_PATTERN = 'ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*'
 
 export const RUNNER_NAME_REGEX = /^[a-zA-Z0-9_.-]+$/
 
@@ -54,23 +44,6 @@ interface RunnerFullDto {
   name: string
   state: 'initializing' | 'ready' | 'disabled' | 'decommissioned' | 'unresponsive'
   regionType?: 'shared' | 'dedicated' | 'custom'
-}
-
-interface Ec2LaunchInput {
-  subnetId: string
-  instanceProfileName: string
-  instanceType: string
-  rootDiskGB: number
-  userDataBase64: string
-  tags: Record<string, string>
-}
-
-interface Ec2LaunchResult {
-  instanceId: string
-  publicIp: string | null
-  privateIp: string | null
-  availabilityZone: string | null
-  imageId: string
 }
 
 // ─── Helpers (internal to lib) ──────────────────────────────────────────────
@@ -173,99 +146,25 @@ async function pollUntilReady(
   return false
 }
 
-async function resolveUbuntuAmi(client: EC2Client): Promise<string> {
-  const r = await client.send(
-    new DescribeImagesCommand({
-      Owners: [UBUNTU_OWNER_ID],
-      Filters: [
-        { Name: 'name', Values: [UBUNTU_NAME_PATTERN] },
-        { Name: 'architecture', Values: ['x86_64'] },
-      ],
-    }),
-  )
-  const images = (r.Images ?? []).filter((i) => i.ImageId && i.CreationDate)
-  images.sort((a, b) => (b.CreationDate ?? '').localeCompare(a.CreationDate ?? ''))
-  if (images.length === 0 || !images[0].ImageId) {
-    throw new Error(`No Ubuntu Noble 24.04 AMI found in region.`)
-  }
-  return images[0].ImageId
-}
-
-async function launchRunnerEc2(client: EC2Client, input: Ec2LaunchInput): Promise<Ec2LaunchResult> {
-  const imageId = await resolveUbuntuAmi(client)
-  const tagList = Object.entries(input.tags).map(([Key, Value]) => ({ Key, Value }))
-
-  const cpuOptions: any = { NestedVirtualization: 'enabled' }
-
-  const run = await client.send(
-    new RunInstancesCommand({
-      ImageId: imageId,
-      InstanceType: input.instanceType as _InstanceType,
-      IamInstanceProfile: { Name: input.instanceProfileName },
-      UserData: input.userDataBase64,
-      CpuOptions: cpuOptions,
-      NetworkInterfaces: [
-        {
-          DeviceIndex: 0,
-          SubnetId: input.subnetId,
-          AssociatePublicIpAddress: true,
-        },
-      ],
-      BlockDeviceMappings: [{ DeviceName: '/dev/sda1', Ebs: { VolumeSize: input.rootDiskGB } }],
-      TagSpecifications: [{ ResourceType: 'instance', Tags: tagList }],
-      MinCount: 1,
-      MaxCount: 1,
-    }),
-  )
-
-  const instance = run.Instances?.[0]
-  if (!instance?.InstanceId) throw new Error('RunInstances returned no instance.')
-
-  let publicIp: string | null = instance.PublicIpAddress ?? null
-  let privateIp: string | null = instance.PrivateIpAddress ?? null
-  let az: string | null = instance.Placement?.AvailabilityZone ?? null
-
-  for (let i = 0; i < 6; i++) {
-    if (publicIp && privateIp && az) break
-    await new Promise((r) => setTimeout(r, 5000))
-    const desc = await client.send(
-      new DescribeInstancesCommand({ InstanceIds: [instance.InstanceId] }),
-    )
-    const inst = desc.Reservations?.[0]?.Instances?.[0]
-    if (!inst) break
-    publicIp = inst.PublicIpAddress ?? publicIp
-    privateIp = inst.PrivateIpAddress ?? privateIp
-    az = inst.Placement?.AvailabilityZone ?? az
-    if (inst.State?.Name === 'running') break
-  }
-
-  return { instanceId: instance.InstanceId, publicIp, privateIp, availabilityZone: az, imageId }
-}
-
 // ─── Main generator ────────────────────────────────────────────────────────
 
 export async function* addSharedRunner(
   opts: AddSharedRunnerOpts,
+  provider: IInfraProvider,
 ): AsyncGenerator<ProgressEvent, AddSharedRunnerResult, void> {
   checkAborted(opts.signal)
 
   // Defaults and validation
   const apiUrl = opts.apiUrl
   const adminToken = opts.adminToken
-  const awsRegion = opts.awsRegion
   const regionId = opts.regionId ?? 'us'
   const runnerName = opts.name ?? defaultName()
   const runnerApiKey = opts.apiKey ?? generateRunnerApiKey()
   const instanceType = opts.instanceType ?? 'c8i.2xlarge'
   const diskGb = opts.diskGb ?? 100
-  const registryUrl = opts.registryUrl ?? ''
-  const subnetId = opts.subnetId ?? ''
-  const instanceProfileName = opts.instanceProfileName ?? ''
   const timeoutSec = opts.timeoutSec ?? 300
   const noWait = opts.noWait ?? false
   const withBackupSidecar = opts.withBackupSidecar ?? false
-  const sidecarPort = 8080
-  const cargoTomlPath = ''
 
   const api: ApiClientOpts = { baseUrl: apiUrl, token: adminToken }
   let runnerId: string | null = null
@@ -299,49 +198,24 @@ export async function* addSharedRunner(
     yield { type: 'data', key: 'runnerId', value: r.id }
     yield { type: 'log', line: `→ runner id=${r.id}` }
 
-    // ─── Stage 4: build user-data ───────────────────────────────────────
-    yield { type: 'stage', stage: 4, total: 7, label: 'Building EC2 user-data' }
+    // ─── Stage 4: provision runner host (via IInfraProvider) ────────────
+    yield { type: 'stage', stage: 4, total: 7, label: 'Provision runner host' }
     checkAborted(opts.signal)
-    const userDataBase64 = buildRunnerUserData({
+    const prov = await provider.provisionRunner({
+      runnerId: runnerId!,
+      apiKey: runnerApiKey,
       apiUrl,
-      token: runnerApiKey,
-      registryUrl,
-      runnerPort: 3003,
+      regionId,
+      instanceType,
+      diskGb,
       withBackupSidecar,
-      sidecarPort,
-      awsRegion,
-      cargoTomlPath,
     })
+    const hostEndpoint = prov.endpoint ?? ''
+    yield { type: 'data', key: 'ec2InstanceId', value: hostEndpoint }
+    yield { type: 'log', line: `→ host provisioned${hostEndpoint ? `: ${hostEndpoint}` : ''}` }
 
-    // ─── Stage 5: launch EC2 ────────────────────────────────────────────
-    yield { type: 'stage', stage: 5, total: 7, label: 'Launching EC2' }
-    checkAborted(opts.signal)
-    const ec2Client = new EC2Client({ region: awsRegion })
-    let ec2Result: Ec2LaunchResult
-    try {
-      const tags: Record<string, string> = {
-        Name: `boxlite-runner-${runnerId!.slice(0, 8)}`,
-        RunnerId: runnerId!,
-        BoxliteOwner: 'add-shared-runner-lib',
-        BoxliteRegion: regionId,
-      }
-      // Add BoxliteStack if available in environment (CLI use case)
-      if (typeof process !== 'undefined' && process.env.BOXLITE_STAGE) {
-        tags.BoxliteStack = process.env.BOXLITE_STAGE
-      }
-      ec2Result = await launchRunnerEc2(ec2Client, {
-        subnetId,
-        instanceProfileName,
-        instanceType,
-        rootDiskGB: diskGb,
-        userDataBase64,
-        tags,
-      })
-    } catch (e: any) {
-      throw e
-    }
-    yield { type: 'data', key: 'ec2InstanceId', value: ec2Result.instanceId }
-    yield { type: 'log', line: `→ instance ${ec2Result.instanceId}, ip=${ec2Result.publicIp ?? '<pending>'}` }
+    // ─── Stage 5: host launched ─────────────────────────────────────────
+    yield { type: 'stage', stage: 5, total: 7, label: 'Runner host launched' }
 
     // ─── Stage 6 & 7: maybe wait ────────────────────────────────────────
     if (noWait) {
@@ -352,8 +226,8 @@ export async function* addSharedRunner(
         runnerId,
         runnerName,
         apiKey: runnerApiKey,
-        ec2InstanceId: ec2Result.instanceId,
-        privateIp: ec2Result.privateIp ?? undefined,
+        ec2InstanceId: hostEndpoint,
+        privateIp: hostEndpoint || undefined,
         finalState: 'INITIALIZING',
       }
     }
@@ -376,8 +250,8 @@ export async function* addSharedRunner(
         runnerId,
         runnerName,
         apiKey: runnerApiKey,
-        ec2InstanceId: ec2Result.instanceId,
-        privateIp: ec2Result.privateIp ?? undefined,
+        ec2InstanceId: hostEndpoint,
+        privateIp: hostEndpoint || undefined,
         finalState: 'READY',
       }
     } else {
@@ -389,8 +263,8 @@ export async function* addSharedRunner(
         runnerId,
         runnerName,
         apiKey: runnerApiKey,
-        ec2InstanceId: ec2Result.instanceId,
-        privateIp: ec2Result.privateIp ?? undefined,
+        ec2InstanceId: hostEndpoint,
+        privateIp: hostEndpoint || undefined,
         finalState: 'TIMEOUT',
       }
     }
