@@ -3,7 +3,7 @@ import { addSharedRunner } from '../add-shared-runner-lib'
 import type { ProgressEvent } from '../runner-ops-types'
 import type { IInfraProvider } from '../infra-provider/types'
 
-const mockFetch = jest.fn()
+const mockFetch: any = jest.fn()
 ;(globalThis as any).fetch = mockFetch
 
 function okResponse(body: unknown): Response {
