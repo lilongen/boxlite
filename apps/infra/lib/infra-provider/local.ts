@@ -40,6 +40,12 @@ export class LocalProcessInfraProvider implements IInfraProvider {
     return join(this.home(runnerId), 'meta.json')
   }
 
+  /** Runner needs BOXLITE_API_URL with the /api suffix; the lib base omits it. */
+  private runnerApiUrl(base: string): string {
+    const trimmed = base.replace(/\/+$/, '')
+    return /\/api$/.test(trimmed) ? trimmed : `${trimmed}/api`
+  }
+
   async provisionRunner(spec: RunnerHostSpec): Promise<ProvisionResult> {
     const home = this.home(spec.runnerId)
     mkdirSync(home, { recursive: true })
@@ -52,7 +58,9 @@ export class LocalProcessInfraProvider implements IInfraProvider {
       API_VERSION: '2',
       RUNNER_DOMAIN: '127.0.0.1',
       BOXLITE_RUNNER_TOKEN: spec.apiKey,
-      BOXLITE_API_URL: spec.apiUrl,
+      // The lib's admin API calls use the no-suffix base (they append /api/…
+      // themselves); the runner expects BOXLITE_API_URL WITH the /api suffix.
+      BOXLITE_API_URL: this.runnerApiUrl(spec.apiUrl),
       INSECURE_REGISTRIES: this.cfg.insecureRegistries,
       AWS_REGION: this.cfg.backupRegion,
       BOXLITE_BACKUPS_BUCKET: this.cfg.backupBucket,

@@ -1,20 +1,20 @@
 import { describe, it, expect, jest, beforeEach } from '@jest/globals'
-import { AwsInfraProvider } from '../aws'
-import type { AwsProviderConfig } from '../types'
 
-jest.mock('@aws-sdk/client-ec2', () => {
-  const send = jest.fn()
-  return {
-    EC2Client: jest.fn(() => ({ send })),
-    RunInstancesCommand: jest.fn((x) => ({ __cmd: 'RunInstances', input: x })),
-    DescribeImagesCommand: jest.fn((x) => ({ __cmd: 'DescribeImages', input: x })),
-    DescribeInstancesCommand: jest.fn((x) => ({ __cmd: 'DescribeInstances', input: x })),
-    TerminateInstancesCommand: jest.fn((x) => ({ __cmd: 'TerminateInstances', input: x })),
-    __send: send,
-  }
-})
-jest.mock('../runner-user-data', () => ({ buildRunnerUserData: jest.fn(() => 'BASE64UD') }))
-const ec2 = jest.requireMock('@aws-sdk/client-ec2') as any
+// ESM mocking: `jest.mock` doesn't intercept static imports under ts-jest/ESM —
+// use `jest.unstable_mockModule` + dynamic import of the SUT (see local.test.ts).
+const send = jest.fn()
+jest.unstable_mockModule('@aws-sdk/client-ec2', () => ({
+  EC2Client: jest.fn(() => ({ send })),
+  RunInstancesCommand: jest.fn((x: unknown) => ({ __cmd: 'RunInstances', input: x })),
+  DescribeImagesCommand: jest.fn((x: unknown) => ({ __cmd: 'DescribeImages', input: x })),
+  DescribeInstancesCommand: jest.fn((x: unknown) => ({ __cmd: 'DescribeInstances', input: x })),
+  TerminateInstancesCommand: jest.fn((x: unknown) => ({ __cmd: 'TerminateInstances', input: x })),
+}))
+jest.unstable_mockModule('../../runner-user-data.js', () => ({ buildRunnerUserData: jest.fn(() => 'BASE64UD') }))
+
+const { AwsInfraProvider } = await import('../aws')
+const ec2 = { __send: send }
+type AwsProviderConfig = import('../types').AwsProviderConfig
 
 const cfg: AwsProviderConfig = {
   kind: 'aws', awsRegion: 'us-east-1', subnetId: 'subnet-x',
