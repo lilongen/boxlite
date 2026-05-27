@@ -53,4 +53,22 @@ describe('AwsInfraProvider', () => {
     await expect(bad.provisionRunner({ runnerId: 'r', apiKey: 'k', apiUrl: 'a', regionId: 'us' }))
       .rejects.toThrow(/cargoTomlPath/)
   })
+
+  it('describeRunner reports alive for a running tagged instance', async () => {
+    ec2.__send.mockResolvedValueOnce({
+      Reservations: [{ Instances: [{ InstanceId: 'i-7', State: { Name: 'running' } }] }],
+    })
+    const p = new AwsInfraProvider(cfg)
+    expect(await p.describeRunner('run-7')).toEqual({ alive: true })
+    const desc = ec2.__send.mock.calls.map((c: any[]) => c[0]).find((c: any) => c.__cmd === 'DescribeInstances')
+    expect(desc.input.Filters).toContainEqual({ Name: 'tag:RunnerId', Values: ['run-7'] })
+  })
+
+  it('describeRunner reports not-alive when the only instance is terminated', async () => {
+    ec2.__send.mockResolvedValueOnce({
+      Reservations: [{ Instances: [{ InstanceId: 'i-8', State: { Name: 'terminated' } }] }],
+    })
+    const p = new AwsInfraProvider(cfg)
+    expect(await p.describeRunner('run-8')).toEqual({ alive: false })
+  })
 })
