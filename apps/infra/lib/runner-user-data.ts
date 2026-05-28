@@ -33,7 +33,18 @@ export function buildRunnerUserData(input: RunnerUserDataInput): string {
   const awsRegion = input.awsRegion ?? "ap-southeast-1";
   const cargoToml = input.cargoTomlPath ?? resolve(process.cwd(), "../../Cargo.toml");
 
-  const RUNNER_VERSION = readFileSync(cargoToml, "utf-8").match(/^version\s*=\s*"(.+?)"/m)![1];
+  // Runner release version to download. Defaults to the repo's Cargo.toml
+  // version; override with BOXLITE_RUNNER_VERSION to pin a specific release
+  // (e.g. a fork test release whose version differs from the working tree).
+  const RUNNER_VERSION =
+    process.env.BOXLITE_RUNNER_VERSION ??
+    readFileSync(cargoToml, "utf-8").match(/^version\s*=\s*"(.+?)"/m)![1];
+
+  // GitHub repo the runner/CLI release assets are pulled from. Defaults to the
+  // canonical `boxlite-ai/boxlite`; override with BOXLITE_RUNNER_RELEASE_REPO to
+  // pull a runner built on a fork (e.g. a backup-capable test release) without
+  // touching the canonical release.
+  const releaseRepo = process.env.BOXLITE_RUNNER_RELEASE_REPO ?? "boxlite-ai/boxlite";
 
   const registryHost = input.registryUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
   const backupsBucket = input.backupsBucket ?? "";
@@ -49,7 +60,7 @@ export function buildRunnerUserData(input: RunnerUserDataInput): string {
   // docs/runner-scaling/scale-down-design.md §11.5).
   const cliInstallFragment = `
 # ── boxlite CLI install (debug-only, no systemd service) ──────────────────
-curl -fsSL "https://github.com/boxlite-ai/boxlite/releases/download/v${RUNNER_VERSION}/boxlite-cli-v${RUNNER_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /usr/local/bin/
+curl -fsSL "https://github.com/${releaseRepo}/releases/download/v${RUNNER_VERSION}/boxlite-cli-v${RUNNER_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /usr/local/bin/
 chmod +x /usr/local/bin/boxlite
 echo "boxlite CLI installed at /usr/local/bin/boxlite (ad-hoc use; no service)"
 `;
@@ -71,7 +82,7 @@ apt-get install -y /tmp/mount-s3.deb
 rm -f /tmp/mount-s3.deb
 
 # Download prebuilt runner binary from GitHub Releases
-curl -fsSL "https://github.com/boxlite-ai/boxlite/releases/download/v${RUNNER_VERSION}/boxlite-runner-v${RUNNER_VERSION}-linux-amd64.tar.gz" | tar xz -C /usr/local/bin/
+curl -fsSL "https://github.com/${releaseRepo}/releases/download/v${RUNNER_VERSION}/boxlite-runner-v${RUNNER_VERSION}-linux-amd64.tar.gz" | tar xz -C /usr/local/bin/
 chmod +x /usr/local/bin/boxlite-runner
 
 # Get host IP via IMDSv2

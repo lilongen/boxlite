@@ -831,6 +831,18 @@ async function main(): Promise<number> {
     await seedSnapshotRunner(args.awsRegion, bastion, db, r2.id, snap.ref);
     process.stderr.write(`       ✓ seeded\n`);
 
+    // r1 may be a freshly-provisioned runner (--reuse-r1) rather than the
+    // long-lived `default` (which already has the snapshot cached). A fresh
+    // runner has no snapshot_runner row, so the scheduler's availability gate
+    // would reject placement onto it. Seed r1 too (idempotent ON CONFLICT).
+    // INSECURE_REGISTRIES is already correct on a runner provisioned by
+    // add-shared-runner (it derives it from the same SnapshotManager ALB DNS).
+    if (args.reuseR1) {
+      process.stderr.write(`[5b/8] Seeding snapshot_runner row state=ready for r1 (reused/fresh)…\n`);
+      await seedSnapshotRunner(args.awsRegion, bastion, db, r1.id, snap.ref);
+      process.stderr.write(`       ✓ seeded r1\n`);
+    }
+
     // ─── [6/8] Place N boxes on r1 ───────────────────────────────────────
     process.stderr.write(`[6/8] Placing ${args.boxesPerRunner} boxes on r1=${r1.name}…\n`);
     const r1Boxes = await placeBoxesOnRunner(api, r1.id, args.snapshotName, args.region, args.boxesPerRunner, "test-r1");
