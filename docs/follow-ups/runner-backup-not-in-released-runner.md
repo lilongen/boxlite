@@ -150,6 +150,66 @@ proven; box migration is proven on the local provider with a locally-built backu
 runner). A one-off alternative for testing: cross-build a backup-capable
 `boxlite-runner-linux-amd64` and SSM-deploy it to the runner EC2s.
 
+## Release ownership — who does what
+
+Permissions (verified 2026-05-28): the operator (`lilongen`) has **admin only on
+the fork** `lilongen/boxlite`; **no push/maintain/admin** on `boxlite-ai/boxlite`
+(where releases live + user-data downloads from) or `boxlite-labs/boxlite`
+(origin). The backup code (`8fe520b8` / `9528cf5e` / `9ae01512`) is **only on fork
+branches**, not on canonical `main`. So:
+
+- **Scenario A — canonical release (production, what user-data points at):**
+  - *You:* open a PR from the integration branch → canonical with the backup
+    commits + `Cargo.toml` version bump; draft release notes.
+  - *Maintainer (push+release on `boxlite-ai/boxlite`):* merge the PR to the
+    release branch, then `gh release create v<ver>` → CI chain builds + uploads
+    the runner asset. (Or: grant the operator release/workflow perms.)
+- **Scenario B — fork self-service (dev/validation, no one else needed):** the
+  operator does it all on `lilongen/boxlite` (see below).
+
+## Fork self-service release — VALIDATED 2026-05-28
+
+Produced a backup-capable `boxlite-runner-v0.9.6-linux-amd64` on
+`lilongen/boxlite` release `v0.9.6` and verified a freshly add-provisioned runner
+pulls it **hands-off (no SSM swap)**: binary exports `boxlite_box_export`,
+`BOXLITE_BACKUPS_BUCKET` set, runner READY. Steps:
+
+1. Fork has Actions enabled (admin → Settings → Actions).
+2. Branch off integration HEAD, bump `Cargo.toml` version (workspace.package +
+   the `workspace.dependencies` pins), push to fork.
+3. `gh release create v0.9.6 --repo lilongen/boxlite --target <branch>` → fires
+   **Build C SDK** (release event → checks out the tag) → uploads all
+   `boxlite-c/cli/runtime-v0.9.6-*` assets to the release.
+4. **Build the runner — mind the `workflow_run` gotcha (below):**
+   `gh workflow run "Build Runner Binary" --repo lilongen/boxlite --ref <branch>`
+   (workflow_dispatch on the release ref → correct checkout + `VERSION=0.9.6`),
+   then `gh run download <id> --name runner-linux-amd64` +
+   `gh release upload v0.9.6 boxlite-runner-v0.9.6-linux-amd64.tar.gz`.
+5. Provision with the env overrides and verify hands-off:
+   `BOXLITE_RUNNER_RELEASE_REPO=lilongen/boxlite BOXLITE_RUNNER_VERSION=0.9.6 ./scripts/add-shared-runner-dev.sh …`
+
+### Gotcha: `workflow_run` checks out the DEFAULT branch, not the release tag
+
+`build-runner-binary.yml` triggers on `workflow_run` after Build C SDK. A
+`workflow_run`-triggered workflow runs against the repository's **default branch**
+(`main`), *not* the originating release tag. On a fork whose `main` is stale
+(`0.9.5`, no backup), the auto-chained Build Runner Binary computed `VERSION=0.9.5`
+and 404'd downloading `boxlite-c-v0.9.5` from the fork. Canonical doesn't hit this
+because it releases *from* `main` (main == release version + has the code).
+**Fork fixes:** either (a) make the fork's `main` the release commit, or (b) skip
+the auto-chain and `workflow_dispatch` Build Runner Binary with `--ref <release
+branch>` (used here — no force-push of `main`), then upload the artifact to the
+release manually.
+
+### Enabling the fork (and any non-default release repo)
+
+[`runner-user-data.ts`](../../apps/infra/lib/runner-user-data.ts) gained two
+non-breaking env overrides (defaults unchanged):
+- `BOXLITE_RUNNER_RELEASE_REPO` (default `boxlite-ai/boxlite`) — repo to download
+  the runner/CLI assets from.
+- `BOXLITE_RUNNER_VERSION` (default = `Cargo.toml` version) — pin a release
+  version independent of the working tree.
+
 ## Test-environment note (rules honored)
 
 The dev `default` runner was only ever **cordoned** (reversible scheduling flag)
