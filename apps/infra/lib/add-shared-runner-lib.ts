@@ -165,6 +165,7 @@ export async function* addSharedRunner(
   const timeoutSec = opts.timeoutSec ?? 300
   const noWait = opts.noWait ?? false
   const withBackupSidecar = opts.withBackupSidecar ?? false
+  const backupsBucket = opts.backupsBucket
 
   const api: ApiClientOpts = { baseUrl: apiUrl, token: adminToken }
   let runnerId: string | null = null
@@ -209,6 +210,7 @@ export async function* addSharedRunner(
       instanceType,
       diskGb,
       withBackupSidecar,
+      backupsBucket,
     })
     const hostEndpoint = prov.endpoint ?? ''
     yield { type: 'data', key: 'ec2InstanceId', value: hostEndpoint }

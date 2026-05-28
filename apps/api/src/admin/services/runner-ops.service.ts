@@ -105,6 +105,7 @@ export class RunnerOpsService {
       instanceType: input.instanceType,
       diskGb: input.diskGb,
       withBackupSidecar: input.withBackupSidecar,
+      backupsBucket: (this.configService.get('runnerOps.backupBucket') as string | undefined) ?? undefined,
       registryUrl: (this.configService.get('runnerOps.registryUrl') as string | undefined) ?? undefined,
       subnetId: (this.configService.get('runnerOps.subnetId') as string | undefined) ?? undefined,
       instanceProfileName:

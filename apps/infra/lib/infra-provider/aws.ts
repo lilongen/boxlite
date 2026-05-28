@@ -52,6 +52,7 @@ export class AwsInfraProvider implements IInfraProvider {
       registryUrl: this.cfg.registryUrl ?? '',
       runnerPort: 3003,
       withBackupSidecar: spec.withBackupSidecar ?? false,
+      backupsBucket: spec.backupsBucket,
       awsRegion: this.cfg.awsRegion,
       cargoTomlPath: this.cargoTomlPath(),
     })

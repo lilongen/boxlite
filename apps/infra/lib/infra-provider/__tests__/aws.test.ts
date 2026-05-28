@@ -12,7 +12,8 @@ jest.unstable_mockModule('@aws-sdk/client-ec2', () => ({
   DescribeInstancesCommand: jest.fn((x: unknown) => ({ __cmd: 'DescribeInstances', input: x })),
   TerminateInstancesCommand: jest.fn((x: unknown) => ({ __cmd: 'TerminateInstances', input: x })),
 }))
-jest.unstable_mockModule('../../runner-user-data.js', () => ({ buildRunnerUserData: jest.fn(() => 'BASE64UD') }))
+const buildUserData = jest.fn((..._args: any[]) => 'BASE64UD')
+jest.unstable_mockModule('../../runner-user-data.js', () => ({ buildRunnerUserData: buildUserData }))
 
 const { AwsInfraProvider } = await import('../aws')
 const ec2 = { __send: send }
@@ -36,6 +37,23 @@ describe('AwsInfraProvider', () => {
     const runCall = ec2.__send.mock.calls.map((c: any[]) => c[0]).find((c: any) => c.__cmd === 'RunInstances')
     const tags = runCall.input.TagSpecifications[0].Tags
     expect(tags).toContainEqual({ Key: 'RunnerId', Value: 'run-1' })
+  })
+
+  it('provisionRunner threads withBackupSidecar + backupsBucket into the runner user-data', async () => {
+    ec2.__send
+      .mockResolvedValueOnce({ Images: [{ ImageId: 'ami-1', CreationDate: '2026-01-01' }] })
+      .mockResolvedValueOnce({ Instances: [{ InstanceId: 'i-1', PrivateIpAddress: '10.0.0.1' }] })
+    buildUserData.mockClear()
+    const p = new AwsInfraProvider(cfg)
+    await p.provisionRunner({
+      runnerId: 'run-b', apiKey: 'k', apiUrl: 'http://api', regionId: 'us',
+      withBackupSidecar: true, backupsBucket: 'boxlite-volume-backups-dev',
+    })
+    // Regression guard: the bucket must reach buildRunnerUserData, else the
+    // runner launches without BOXLITE_BACKUPS_BUCKET and scale-down backup fails.
+    expect(buildUserData).toHaveBeenCalledWith(
+      expect.objectContaining({ withBackupSidecar: true, backupsBucket: 'boxlite-volume-backups-dev' }),
+    )
   })
 
   it('terminateRunner filters by tag:RunnerId then terminates', async () => {

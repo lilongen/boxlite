@@ -9,6 +9,9 @@ export interface RunnerHostSpec {
   instanceType?: string
   diskGb?: number
   withBackupSidecar?: boolean
+  /** S3 bucket for `.boxlite` backup archives; surfaces as the runner's
+   * `BOXLITE_BACKUPS_BUCKET` env (only applied when withBackupSidecar=true). */
+  backupsBucket?: string
 }
 
 export interface ProvisionResult {

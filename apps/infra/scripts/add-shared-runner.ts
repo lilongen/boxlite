@@ -404,6 +404,7 @@ async function main(): Promise<number> {
         instanceType: args.instanceType,
         diskGb: args.rootDiskGB,
         withBackupSidecar: args.withBackupSidecar,
+        backupsBucket: args.backupsBucket,
         registryUrl: args.registryUrl,
         subnetId: args.subnetId,
         instanceProfileName: args.instanceProfileName,

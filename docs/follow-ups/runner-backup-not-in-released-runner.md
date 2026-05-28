@@ -95,14 +95,21 @@ undisturbed; **nothing ever scheduled onto `default`** (cordoned during the
 window, restored after). So the scale-down + migration logic AND the runner-side
 backup are correct from current source — the only gap is the released artifact.
 
-**Two real gaps surfaced while doing this (worth fixing for the 正路):**
-1. **`--with-backup-sidecar` / `--backups-bucket` are NOT wired through
-   `AwsInfraProvider` to the user-data.** Even with both flags, the launched
-   runner's systemd unit had **no `BOXLITE_BACKUPS_BUCKET`** (so `CreateBackup`
-   errors "bucket not set"). Had to add the env via SSM. The IInfraProvider
-   refactor dropped the backup-flag passthrough; restore it in
-   `apps/infra/lib/infra-provider/aws.ts` → `buildRunnerUserData(... withBackupSidecar, backupsBucket)`.
-2. The released runner lacks backup (root cause below) — the actual blocker.
+**Two real gaps surfaced while doing this:**
+1. **`--backups-bucket` was never threaded to `buildRunnerUserData`** → launched
+   AWS runners had **no `BOXLITE_BACKUPS_BUCKET`** (so `CreateBackup` errors
+   "bucket not set"); had to add the env via SSM. This was **NOT a refactor
+   regression** — it pre-existed: the pre-`AwsInfraProvider` inline
+   `add-shared-runner-lib.ts` (`83480713^`) also omitted `backupsBucket` from its
+   `buildRunnerUserData` call. The `add-shared` flow never auto-set the bucket on
+   either feat or integration; feat's working backup ran against a
+   **hand-prepared** runner (bucket env + backup-capable binary deployed manually
+   — the same SSM steps done here). **FIXED 2026-05-28**: `backupsBucket` now
+   threads CLI → `AddSharedRunnerOpts` → `RunnerHostSpec` → `AwsInfraProvider.provisionRunner`
+   → `buildRunnerUserData`, plus the runner-ops API path (from
+   `runnerOps.backupBucket` config); regression test in `aws.test.ts`.
+2. The released runner lacks backup (root cause below) — the actual blocker
+   (needs a backup-capable runner release; the binary builds fine from source).
 
 ## Fix — 正路 (re-cut the runner release from current source)
 
