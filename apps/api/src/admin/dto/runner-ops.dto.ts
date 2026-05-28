@@ -26,10 +26,6 @@ export class AddSharedRunnerRequestDto {
   @IsOptional() @IsInt() @Min(30) @Max(2000)
   diskGb?: number
 
-  @ApiPropertyOptional({ description: 'Install backup sidecar (dev-only)' })
-  @IsOptional() @IsBoolean()
-  withBackupSidecar?: boolean
-
   @ApiPropertyOptional({ description: 'Readiness poll timeout seconds; default 600' })
   @IsOptional() @IsInt() @Min(30) @Max(3600)
   timeoutSec?: number

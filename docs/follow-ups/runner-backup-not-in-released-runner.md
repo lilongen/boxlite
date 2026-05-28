@@ -96,18 +96,22 @@ window, restored after). So the scale-down + migration logic AND the runner-side
 backup are correct from current source — the only gap is the released artifact.
 
 **Two real gaps surfaced while doing this:**
-1. **`--backups-bucket` was never threaded to `buildRunnerUserData`** → launched
-   AWS runners had **no `BOXLITE_BACKUPS_BUCKET`** (so `CreateBackup` errors
-   "bucket not set"); had to add the env via SSM. This was **NOT a refactor
-   regression** — it pre-existed: the pre-`AwsInfraProvider` inline
-   `add-shared-runner-lib.ts` (`83480713^`) also omitted `backupsBucket` from its
-   `buildRunnerUserData` call. The `add-shared` flow never auto-set the bucket on
-   either feat or integration; feat's working backup ran against a
-   **hand-prepared** runner (bucket env + backup-capable binary deployed manually
-   — the same SSM steps done here). **FIXED 2026-05-28**: `backupsBucket` now
-   threads CLI → `AddSharedRunnerOpts` → `RunnerHostSpec` → `AwsInfraProvider.provisionRunner`
-   → `buildRunnerUserData`, plus the runner-ops API path (from
-   `runnerOps.backupBucket` config); regression test in `aws.test.ts`.
+1. **The runner never got `BOXLITE_BACKUPS_BUCKET` from the add-shared flow** → on
+   launch `CreateBackup` errors "bucket not set"; had to add the env via SSM. NOT
+   a refactor regression — pre-existed (the pre-`AwsInfraProvider` inline
+   `add-shared-runner-lib.ts` at `83480713^` also omitted `backupsBucket` from its
+   `buildRunnerUserData` call). feat's working backup ran against a **hand-prepared**
+   runner (bucket env + backup binary deployed manually — same SSM steps done here).
+   **FIXED 2026-05-28 (config-level redesign, `c6283191`→superseded):** since every
+   prod runner enables backup by default, the misleading `--with-backup-sidecar` /
+   `--sidecar-port` flags and the per-call `backupsBucket` threading were **removed**.
+   The bucket is now **per-environment provider config** (`AwsProviderConfig.backupsBucket`),
+   resolved once at construction (CLI: `BOXLITE_BACKUPS_BUCKET` / `BOXLITE_RUNNER_OPS_BACKUP_BUCKET`
+   / convention `boxlite-volume-backups-${BOXLITE_STAGE}`; API: `runnerOps.backupBucket`).
+   `buildRunnerUserData` sets `BOXLITE_BACKUPS_BUCKET` whenever the bucket is present
+   and always installs the `boxlite` CLI. `add-shared-runner-dev.sh` auto-exports the
+   bucket by stage. Mirrors how the Local provider already worked. Regression test
+   in `aws.test.ts`.
 2. The released runner lacks backup (root cause below) — the actual blocker
    (needs a backup-capable runner release; the binary builds fine from source).
 

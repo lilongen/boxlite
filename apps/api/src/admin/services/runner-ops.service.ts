@@ -76,6 +76,10 @@ export class RunnerOpsService {
       instanceProfileName: str('runnerOps.instanceProfileName'),
       registryUrl: str('runnerOps.registryUrl'),
       cargoTomlPath: str('runnerOps.cargoTomlPath'),
+      // Per-environment backups bucket: BOXLITE_RUNNER_OPS_BACKUP_BUCKET. Resolved
+      // once here at provider construction; the runner gets BOXLITE_BACKUPS_BUCKET
+      // set via user-data — never threaded per add-shared call.
+      backupsBucket: str('runnerOps.backupBucket'),
     }
   }
 
@@ -84,7 +88,6 @@ export class RunnerOpsService {
     regionId?: string
     instanceType?: string
     diskGb?: number
-    withBackupSidecar?: boolean
     timeoutSec?: number
   }): Promise<{ id: string }> {
     const id = ulid()
@@ -104,8 +107,6 @@ export class RunnerOpsService {
       regionId: input.regionId,
       instanceType: input.instanceType,
       diskGb: input.diskGb,
-      withBackupSidecar: input.withBackupSidecar,
-      backupsBucket: (this.configService.get('runnerOps.backupBucket') as string | undefined) ?? undefined,
       registryUrl: (this.configService.get('runnerOps.registryUrl') as string | undefined) ?? undefined,
       subnetId: (this.configService.get('runnerOps.subnetId') as string | undefined) ?? undefined,
       instanceProfileName:

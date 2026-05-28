@@ -51,8 +51,8 @@ export class AwsInfraProvider implements IInfraProvider {
       token: spec.apiKey,
       registryUrl: this.cfg.registryUrl ?? '',
       runnerPort: 3003,
-      withBackupSidecar: spec.withBackupSidecar ?? false,
-      backupsBucket: spec.backupsBucket,
+      // Per-environment bucket (set on the provider config), not per-call.
+      backupsBucket: this.cfg.backupsBucket,
       awsRegion: this.cfg.awsRegion,
       cargoTomlPath: this.cargoTomlPath(),
     })

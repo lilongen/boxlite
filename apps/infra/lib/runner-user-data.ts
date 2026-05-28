@@ -17,22 +17,12 @@ export interface RunnerUserDataInput {
   /** Absolute path to repo root Cargo.toml. Defaults to <cwd>/../../Cargo.toml. */
   cargoTomlPath?: string;
   /**
-   * Test-only flag. When true, downloads `boxlite-cli` so operators can use
-   * it ad-hoc on the runner (debugging, exporting, inspecting boxes).
-   *
-   * NOTE: this used to also enable a `boxlite serve` systemd sidecar but that
-   * approach was abandoned (see docs/runner-scaling/scale-down-design.md §11.5
-   * — `BoxliteRuntime` requires an exclusive process lock on `BOXLITE_HOME`).
-   * The CreateBackup path now uses in-process FFI bindings via libboxlite.a.
-   */
-  withBackupSidecar?: boolean;
-  /** Sidecar listen port (only meaningful when withBackupSidecar=true). */
-  sidecarPort?: number;
-  /**
-   * S3 bucket where `.boxlite` archives are stored during scale-down.
-   * Only meaningful when withBackupSidecar=true. The runner reads this as
-   * `BOXLITE_BACKUPS_BUCKET` and uses it for both PutObject (CreateBackup)
-   * and GetObject (createFromBackupArchive).
+   * S3 bucket where `.boxlite` archives are stored during scale-down. When set,
+   * surfaces as the runner's `BOXLITE_BACKUPS_BUCKET` env — the runner uses it
+   * for both PutObject (CreateBackup) and GetObject (createFromBackupArchive).
+   * Per-environment convention: caller resolves this once at provider construction
+   * (e.g. from `BOXLITE_BACKUPS_BUCKET` env or `boxlite-volume-backups-${stage}`),
+   * so it's NOT per-call. Omit to disable backup on this runner (legacy).
    */
   backupsBucket?: string;
 }
@@ -46,26 +36,23 @@ export function buildRunnerUserData(input: RunnerUserDataInput): string {
   const RUNNER_VERSION = readFileSync(cargoToml, "utf-8").match(/^version\s*=\s*"(.+?)"/m)![1];
 
   const registryHost = input.registryUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
-  const withSidecar = input.withBackupSidecar === true;
-  // input.sidecarPort is kept on the type for backward-compat with callers, but
-  // unused since the systemd sidecar was retired (Option A — in-process FFI).
   const backupsBucket = input.backupsBucket ?? "";
-  const backupsBucketEnv = withSidecar && backupsBucket ? `Environment=BOXLITE_BACKUPS_BUCKET=${backupsBucket}\n` : "";
+  // Always set BOXLITE_BACKUPS_BUCKET when a bucket is configured for this env.
+  // Every prod runner enables backup by default; absence is only the legacy
+  // "no backup configured" fallback (returns "bucket not set" from CreateBackup).
+  const backupsBucketEnv = backupsBucket ? `Environment=BOXLITE_BACKUPS_BUCKET=${backupsBucket}\n` : "";
 
-  // Install `boxlite` CLI for ad-hoc operator use. The original sidecar
-  // (`boxlite serve` as a systemd unit) was removed in the Option-A rewrite
-  // because `BoxliteRuntime` cannot share `BOXLITE_HOME` between processes —
-  // see docs/runner-scaling/scale-down-design.md §11.5. The runner now does
-  // export/import in-process via libboxlite.a FFI; the CLI here is only
-  // useful for manual debugging by operators.
-  const sidecarFragment = withSidecar
-    ? `
+  // Always install the `boxlite` CLI for ad-hoc operator use (export/inspect).
+  // It's NOT a service — the runner does backup/restore in-process via the
+  // libboxlite.a FFI (the original `boxlite serve` systemd sidecar was retired
+  // because BoxliteRuntime needs an exclusive lock on BOXLITE_HOME — see
+  // docs/runner-scaling/scale-down-design.md §11.5).
+  const cliInstallFragment = `
 # ── boxlite CLI install (debug-only, no systemd service) ──────────────────
 curl -fsSL "https://github.com/boxlite-ai/boxlite/releases/download/v${RUNNER_VERSION}/boxlite-cli-v${RUNNER_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /usr/local/bin/
 chmod +x /usr/local/bin/boxlite
 echo "boxlite CLI installed at /usr/local/bin/boxlite (ad-hoc use; no service)"
-`
-    : "";
+`;
 
   const script = `#!/bin/bash
 exec > /var/log/runner-setup.log 2>&1
@@ -122,7 +109,7 @@ systemctl enable boxlite-runner
 systemctl start boxlite-runner
 
 echo "Runner setup complete"
-${sidecarFragment}
+${cliInstallFragment}
 `;
   return Buffer.from(script).toString("base64");
 }

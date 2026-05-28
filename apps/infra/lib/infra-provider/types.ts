@@ -8,10 +8,6 @@ export interface RunnerHostSpec {
   regionId: string
   instanceType?: string
   diskGb?: number
-  withBackupSidecar?: boolean
-  /** S3 bucket for `.boxlite` backup archives; surfaces as the runner's
-   * `BOXLITE_BACKUPS_BUCKET` env (only applied when withBackupSidecar=true). */
-  backupsBucket?: string
 }
 
 export interface ProvisionResult {
@@ -35,6 +31,11 @@ export interface AwsProviderConfig {
   instanceProfileName?: string
   registryUrl?: string
   cargoTomlPath?: string
+  /** Per-environment S3 bucket for `.boxlite` backup archives; sets the runner's
+   * `BOXLITE_BACKUPS_BUCKET` env at provision time. Resolved once at provider
+   * construction (e.g. from `BOXLITE_BACKUPS_BUCKET` / `BOXLITE_RUNNER_OPS_BACKUP_BUCKET`,
+   * or by convention `boxlite-volume-backups-${stage}`). */
+  backupsBucket?: string
 }
 
 export interface LocalProviderConfig {

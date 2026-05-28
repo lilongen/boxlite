@@ -204,9 +204,6 @@ interface Args {
   dryRun: boolean;
   yes: boolean;
   awsProfile?: string;
-  withBackupSidecar: boolean;
-  sidecarPort: number;
-  backupsBucket?: string;
 }
 
 function parseArgs(): Args {
@@ -229,9 +226,6 @@ function parseArgs(): Args {
     .option("--dry-run", "Print planned actions, no side effects")
     .option("--yes", "Skip interactive confirmation")
     .option("--aws-profile <name>", "AWS profile (overrides AWS_PROFILE)")
-    .option("--with-backup-sidecar", "TEST-ONLY: deploy boxlite serve sidecar on :sidecarPort for export/import PoC")
-    .option("--sidecar-port <n>", "Sidecar port (default 8080)", (v) => parseInt(v, 10), 8080)
-    .option("--backups-bucket <name>", "S3 bucket for .boxlite archives (only with --with-backup-sidecar)")
     .parse();
 
   const opts = p.opts();
@@ -266,9 +260,6 @@ function parseArgs(): Args {
     dryRun: !!opts.dryRun,
     yes: !!opts.yes,
     awsProfile: opts.awsProfile,
-    withBackupSidecar: !!opts.withBackupSidecar,
-    sidecarPort: opts.sidecarPort,
-    backupsBucket: opts.backupsBucket,
   };
 }
 
@@ -330,6 +321,14 @@ function buildProvider(args: Args): IInfraProvider {
       instanceProfileName: args.instanceProfileName,
       registryUrl: args.registryUrl,
       cargoTomlPath: CARGO_TOML,
+      // Per-environment backups bucket: BOXLITE_BACKUPS_BUCKET (preferred) or
+      // BOXLITE_RUNNER_OPS_BACKUP_BUCKET (alias used by the API). Convention for
+      // SST stacks: `boxlite-volume-backups-${BOXLITE_STAGE}`. Resolved once
+      // here — never threaded per-call.
+      backupsBucket:
+        process.env.BOXLITE_BACKUPS_BUCKET ??
+        process.env.BOXLITE_RUNNER_OPS_BACKUP_BUCKET ??
+        (process.env.BOXLITE_STAGE ? `boxlite-volume-backups-${process.env.BOXLITE_STAGE}` : undefined),
     };
   }
   return createInfraProvider(cfg);
@@ -403,8 +402,6 @@ async function main(): Promise<number> {
         regionId: args.regionId,
         instanceType: args.instanceType,
         diskGb: args.rootDiskGB,
-        withBackupSidecar: args.withBackupSidecar,
-        backupsBucket: args.backupsBucket,
         registryUrl: args.registryUrl,
         subnetId: args.subnetId,
         instanceProfileName: args.instanceProfileName,

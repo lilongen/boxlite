@@ -39,20 +39,18 @@ describe('AwsInfraProvider', () => {
     expect(tags).toContainEqual({ Key: 'RunnerId', Value: 'run-1' })
   })
 
-  it('provisionRunner threads withBackupSidecar + backupsBucket into the runner user-data', async () => {
+  it('provisionRunner reads backupsBucket from AwsProviderConfig (per-env, not per-call)', async () => {
     ec2.__send
       .mockResolvedValueOnce({ Images: [{ ImageId: 'ami-1', CreationDate: '2026-01-01' }] })
       .mockResolvedValueOnce({ Instances: [{ InstanceId: 'i-1', PrivateIpAddress: '10.0.0.1' }] })
     buildUserData.mockClear()
-    const p = new AwsInfraProvider(cfg)
-    await p.provisionRunner({
-      runnerId: 'run-b', apiKey: 'k', apiUrl: 'http://api', regionId: 'us',
-      withBackupSidecar: true, backupsBucket: 'boxlite-volume-backups-dev',
-    })
-    // Regression guard: the bucket must reach buildRunnerUserData, else the
-    // runner launches without BOXLITE_BACKUPS_BUCKET and scale-down backup fails.
+    // Bucket is provider-level config, NOT a field on RunnerHostSpec.
+    const p = new AwsInfraProvider({ ...cfg, backupsBucket: 'boxlite-volume-backups-dev' })
+    await p.provisionRunner({ runnerId: 'run-b', apiKey: 'k', apiUrl: 'http://api', regionId: 'us' })
+    // Regression guard: AwsProviderConfig.backupsBucket must reach buildRunnerUserData,
+    // else the runner launches without BOXLITE_BACKUPS_BUCKET and scale-down backup fails.
     expect(buildUserData).toHaveBeenCalledWith(
-      expect.objectContaining({ withBackupSidecar: true, backupsBucket: 'boxlite-volume-backups-dev' }),
+      expect.objectContaining({ backupsBucket: 'boxlite-volume-backups-dev' }),
     )
   })
 

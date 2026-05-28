@@ -20,10 +20,6 @@ export interface AddSharedRunnerOpts {
   regionId?: string
   instanceType?: string
   diskGb?: number
-  withBackupSidecar?: boolean
-  /** S3 bucket for `.boxlite` backup archives; threaded to the runner's
-   * BOXLITE_BACKUPS_BUCKET env so scale-down backup/restore can read/write it. */
-  backupsBucket?: string
   registryUrl?: string
   subnetId?: string
   instanceProfileName?: string

@@ -117,6 +117,13 @@ fi
 echo "       ✓ api=$BOXLITE_API_URL"
 echo "       ✓ registry=$BOXLITE_REGISTRY_URL"
 
+# Per-environment convention: one backups bucket per stack — matches the SST
+# resource name. Honour an explicit override if the caller already set
+# BOXLITE_BACKUPS_BUCKET. Skipping this is fine; the runner just won't have
+# backup configured (the same as before this script auto-set it).
+export BOXLITE_BACKUPS_BUCKET="${BOXLITE_BACKUPS_BUCKET:-boxlite-volume-backups-${BOXLITE_STAGE}}"
+echo "       ✓ backups bucket=$BOXLITE_BACKUPS_BUCKET"
+
 # ── 3. invoke add-shared-runner.ts ───────────────────────────────────────────
 echo "[3/3] Running add-shared-runner.ts…"
 echo "──────────────────────────────────────────────────────────────────"
