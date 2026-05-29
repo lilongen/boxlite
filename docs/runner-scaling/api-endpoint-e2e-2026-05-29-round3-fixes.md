@@ -25,6 +25,35 @@ scale-down r1 → SUCCESS @ stage 10: both boxes migrated to r2, r1 row deleted,
 cancel an add after row creation → CANCELLED + orphan row cordoned & deleted (count 0), no EC2
 ```
 
+## Timeline & phase timings (UTC, 2026-05-29)
+
+| Time (UTC) | Milestone |
+| --- | --- |
+| 07:31:43 | add **r1** → EC2 launched (`i-08e831790a65768e9`) |
+| 07:32:40 | **r1 READY** (~57 s from EC2 launch) |
+| 07:33:06 | add **r2** → EC2 launched (`i-0f8d831623880c17c`) |
+| 07:33:55 | **r2 READY** (~49 s) |
+| 07:34:16–07:34:22 | 2 boxes placed on r1 |
+| 07:34:38 | both boxes **STARTED** |
+| 07:35:24 → 07:35:44 | **scale-down r1** running → **SUCCESS** (stage 10) |
+| 07:36:34 | cancel #1 → CANCELLED, but cleanup DELETE **428** (bug surfaced) |
+| 07:42:03 | cancel #3 (after row created) still 428 — nx cache masking the lib fix |
+| 07:44:20 | cancel #4 (after clean rebuild) → CANCELLED + **orphan row deleted (count 0)**, no EC2 ✅ |
+
+Main phase durations (wall clock):
+
+- **add runner (provision → READY):** r1 **~57 s**, r2 **~49 s** (EC2 launch →
+  runner heartbeat ready; fork v0.9.6 boot + register). Adds are serialized by
+  the one-concurrent-add platform lock, so r1 then r2.
+- **box placement → STARTED (2 boxes):** **~16–22 s**.
+- **scale-down + live migration (10 stages):** **~40 s** (job-measured
+  `durationMs: 39891` — cordon → stop → backup (`Box.Export`→S3) → archive →
+  restart-on-peer → drain → DELETE row → terminate host).
+- **cancel → CANCELLED (+ orphan cordon+delete):** **~2 s**.
+
+(End-to-end the runner ops above span ~07:31–07:36; 07:36–07:44 is the
+cancel-cleanup bug fix + clean-rebuild re-validation.)
+
 ## Bug found by this E2E (and fixed): orphan-cleanup DELETE needed a cordon
 
 The first cancel run exposed that the PR2#4/M2 cleanup's `DELETE /api/admin/runners/:id`
