@@ -36,9 +36,16 @@ export function buildRunnerUserData(input: RunnerUserDataInput): string {
   // Runner release version to download. Defaults to the repo's Cargo.toml
   // version; override with BOXLITE_RUNNER_VERSION to pin a specific release
   // (e.g. a fork test release whose version differs from the working tree).
-  const RUNNER_VERSION =
-    process.env.BOXLITE_RUNNER_VERSION ??
-    readFileSync(cargoToml, "utf-8").match(/^version\s*=\s*"(.+?)"/m)![1];
+  let RUNNER_VERSION = process.env.BOXLITE_RUNNER_VERSION;
+  if (!RUNNER_VERSION) {
+    const m = readFileSync(cargoToml, "utf-8").match(/^version\s*=\s*"(.+?)"/m);
+    if (!m) {
+      throw new Error(
+        `No top-level 'version = "..."' found in ${cargoToml}; set BOXLITE_RUNNER_VERSION to pin the runner release.`,
+      );
+    }
+    RUNNER_VERSION = m[1];
+  }
 
   // GitHub repo the runner/CLI release assets are pulled from. Defaults to the
   // canonical `boxlite-ai/boxlite`; override with BOXLITE_RUNNER_RELEASE_REPO to

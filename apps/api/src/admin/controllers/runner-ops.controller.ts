@@ -12,6 +12,7 @@ import {
   Logger,
   NotFoundException,
   Param,
+  ParseUUIDPipe,
   Post,
   UseGuards,
 } from '@nestjs/common'
@@ -83,7 +84,9 @@ export class RunnerOpsController {
   @ApiOperation({ operationId: 'scaleDownRunner', summary: 'Drain and remove a SHARED runner' })
   @ApiResponse({ status: 202, schema: { type: 'object', properties: { id: { type: 'string' } } } })
   async scaleDown(
-    @Param('runnerId') runnerId: string,
+    // runner ids are UUID PKs; reject malformed ids at the boundary (400) rather
+    // than passing them into the self-call URL.
+    @Param('runnerId', ParseUUIDPipe) runnerId: string,
     @Body() body: ScaleDownRequestDto,
   ): Promise<{ id: string }> {
     return this.service.startScaleDownRunner(runnerId, body)

@@ -81,10 +81,15 @@ describe('RunnerOpsController', () => {
   it('POST /admin/runner-ops/:id/scale-down returns 202', async () => {
     service.startScaleDownRunner.mockResolvedValueOnce({ id: 'j-2' })
     const res = await request(app.getHttpServer())
-      .post('/admin/runner-ops/r-1/scale-down')
+      .post('/admin/runner-ops/3b42a723-0000-4000-8000-000000000001/scale-down')
       .send({})
       .expect(202)
     expect(res.body.id).toBe('j-2')
+  })
+
+  it('POST /admin/runner-ops/:id/scale-down rejects a non-UUID runnerId with 400', async () => {
+    // ParseUUIDPipe rejects before the handler runs, so the service is never reached.
+    await request(app.getHttpServer()).post('/admin/runner-ops/not-a-uuid/scale-down').send({}).expect(400)
   })
 
   it('GET /admin/runner-ops/jobs/:id returns 404 when missing', async () => {

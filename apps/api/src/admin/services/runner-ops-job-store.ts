@@ -175,8 +175,15 @@ export class RunnerOpsJobStore {
 
   async releaseLock(kind: JobKind, jobId: string): Promise<void> {
     const lockKey = `runner-ops:lock:${kind}`
-    const current = await this.redis.get(lockKey)
-    if (current === jobId) await this.redis.del(lockKey)
+    // Atomic check-and-delete (mirrors renewLock): only the current holder may
+    // release. A non-atomic get-then-del could, at TTL expiry, delete a lock a
+    // different job acquired in between.
+    await this.redis.eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+      1,
+      lockKey,
+      jobId,
+    )
   }
 
   /** Extend our lock's TTL — only if we still hold it. Called as a heartbeat on
