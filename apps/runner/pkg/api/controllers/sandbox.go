@@ -143,6 +143,13 @@ func CreateBackup(logger *slog.Logger) gin.HandlerFunc {
 			return
 		}
 
+		// Mark COMPLETED so apps/api `check-backup-states` cron sees the terminal state.
+		// (BoxLite backup is synchronous — when CreateBackup returns nil, the archive is
+		// already in S3.) Without this the sandbox stays stuck in BACKUP_PENDING.
+		if setErr := runner.BackupInfoCache.SetBackupState(ctx.Request.Context(), sandboxId, enums.BackupStateCompleted, createBackupDTO.Snapshot, nil); setErr != nil {
+			logger.WarnContext(ctx.Request.Context(), "failed to mark backup completed", "sandbox", sandboxId, "error", setErr)
+		}
+
 		ctx.JSON(http.StatusCreated, "Backup started")
 	}
 }

@@ -814,8 +814,13 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/config", get(config::get_config))
         // Runtime metrics
         .route("/v1/default/metrics", get(metrics::runtime_metrics))
-        // Box CRUD (import first — static path before param path)
-        .route("/v1/default/boxes/import", post(advanced::import_box))
+        // Box CRUD (import first — static path before param path).
+        // Disable per-route body limit: imported `.boxlite` archives can be
+        // tens of MB to multi-GB; axum's 2 MiB default would block them.
+        .route(
+            "/v1/default/boxes/import",
+            post(advanced::import_box).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route(
             "/v1/default/boxes",
             post(boxes::create_box).get(boxes::list_boxes),

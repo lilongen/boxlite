@@ -1,6 +1,5 @@
 use crate::db::{BoxStore, Database};
 use crate::images::{ImageDiskManager, ImageManager};
-use crate::init_logging_for;
 use crate::litebox::config::BoxConfig;
 use crate::litebox::{BoxManager, LiteBox, LocalSnapshotBackend, SharedBoxImpl};
 use crate::lock::{FileLockManager, LockManager};
@@ -142,8 +141,6 @@ impl RuntimeImpl {
             ))
         })?;
 
-        init_logging_for(&layout)?;
-
         let runtime_lock = RuntimeLock::acquire(layout.home_dir()).map_err(|e| {
             BoxliteError::Internal(format!(
                 "Failed to acquire runtime lock at {}: {}",
@@ -270,14 +267,17 @@ impl RuntimeImpl {
 
     /// Import a box from a `.boxlite` archive.
     ///
-    /// Creates a new box with a new ID from archived disk images and
-    /// configuration. The imported box starts in `Stopped` state.
+    /// Creates a box from archived disk images and configuration. When `id` is
+    /// `Some(...)`, the imported box uses that id verbatim (subject to
+    /// [`BoxID::parse`] validation); otherwise a fresh id is minted. The
+    /// imported box starts in `Stopped` state.
     pub async fn import_box(
         self: &Arc<Self>,
         archive: BoxArchive,
         name: Option<String>,
+        id: Option<String>,
     ) -> BoxliteResult<LiteBox> {
-        super::import::import_box(self, archive, name).await
+        super::import::import_box(self, archive, name, id).await
     }
 
     /// Inner create logic shared by `create()` and `get_or_create()`.
@@ -1003,10 +1003,11 @@ impl RuntimeImpl {
         name: Option<String>,
         options: BoxOptions,
         initial_status: BoxStatus,
+        id_override: Option<crate::runtime::id::BoxID>,
     ) -> BoxliteResult<LiteBox> {
         use crate::litebox::config::ContainerRuntimeConfig;
 
-        let box_id = BoxIDMint::mint();
+        let box_id = id_override.unwrap_or_else(BoxIDMint::mint);
         let container_id = ContainerID::new();
         let now = Utc::now();
 
@@ -1514,8 +1515,9 @@ impl super::backend::RuntimeBackend for LocalRuntime {
         &self,
         archive: BoxArchive,
         name: Option<String>,
+        id: Option<String>,
     ) -> BoxliteResult<crate::litebox::LiteBox> {
-        self.0.import_box(archive, name).await
+        self.0.import_box(archive, name, id).await
     }
 
     fn shutdown_sync(&self) {
@@ -2193,6 +2195,7 @@ mod tests {
             &local,
             BoxArchive::new(missing_archive),
             Some("imported".to_string()),
+            None,
         )
         .await;
 

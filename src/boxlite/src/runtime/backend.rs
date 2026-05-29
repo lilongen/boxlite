@@ -51,6 +51,7 @@ pub(crate) trait RuntimeBackend: Send + Sync {
         &self,
         _archive: BoxArchive,
         _name: Option<String>,
+        _id: Option<String>,
     ) -> BoxliteResult<LiteBox> {
         Err(BoxliteError::Unsupported(
             "This operation is only supported for local runtimes (not REST backends)".to_string(),

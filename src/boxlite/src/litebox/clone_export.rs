@@ -130,6 +130,7 @@ impl BoxImpl {
                     names.get(i).cloned(),
                     self.config.options.clone(),
                     BoxStatus::Stopped,
+                    None,
                 )
                 .await
             {

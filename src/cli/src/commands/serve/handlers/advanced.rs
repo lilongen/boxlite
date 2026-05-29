@@ -119,7 +119,7 @@ pub(in crate::commands::serve) async fn import_box(
     }
 
     let archive = BoxArchive::new(archive_path);
-    match state.runtime.import_box(archive, query.name).await {
+    match state.runtime.import_box(archive, query.name, query.id).await {
         Ok(litebox) => {
             let info = litebox.info();
             let box_id = info.id.to_string();
