@@ -14,7 +14,7 @@
 **Branch:** `feat/cloud-mvp-runner-auto-scaling`
 **Predecessors:**
 - `docs/superpowers/specs/2026-05-21-add-runner-script-design.md` (CUSTOM runner script)
-- `docs/runner-scaling/scale-down-design.md` (10-stage scale-down design)
+- `docs/runner-scaling/runner-scale-design.md` (the runner add/scale-down design)
 - `docs/runner-scaling/README.md` (index of scripts + e2e reports v1–v5)
 
 ---
@@ -520,7 +520,7 @@ UI            Controller     Service             Lib                AWS / API
  │ display result + close dialog                  │                   │
 ```
 
-### 10.2 Scale down (happy path summarized; full 10 stages in scale-down-design.md §3)
+### 10.2 Scale down (happy path summarized; full 10 stages in runner-scale-design.md §5)
 
 ```
 UI            Controller     Service             Lib                apps/api / EC2
@@ -756,7 +756,7 @@ These do not block the spec, but should be confirmed during implementation:
 ## 20. References
 
 - `docs/apps/BoxLite cloud MVP.md` — MVP scope this implementation services.
-- `docs/runner-scaling/scale-down-design.md` — full scale-down flow (this spec consumes it as a black box).
+- `docs/runner-scaling/runner-scale-design.md` — full scale-down flow (this spec consumes it as a black box).
 - `docs/runner-scaling/README.md` — runner-scaling docs index, scripts inventory, validation history.
 - `docs/runner-scaling/e2e-multi-sandbox-report-v5.md` — most recent successful end-to-end of scale-down.
 - `docs/superpowers/specs/2026-05-21-add-runner-script-design.md` — predecessor design for the CUSTOM runner CLI.

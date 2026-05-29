@@ -5,7 +5,7 @@
 **Branch:** `feat/cloud-mvp-runner-auto-scaling` (feature) — build/test via the converged `integration/infra-local-and-runner-scale` worktree or the runner-scaling worktree (which has submodules + the built backup runner stack).
 **Predecessors:**
 - `docs/superpowers/specs/2026-05-25-runner-ops-admin-ui-design.md` (the runner-ops wrapper)
-- `docs/runner-scaling/scale-down-design.md` (10-stage scale-down + backup FFI)
+- `docs/runner-scaling/runner-scale-design.md` (10-stage scale-down + backup FFI)
 - memory `project_runner_ops_curl_on_infra_local` (Phase A/B validation, infra-local component facts)
 
 ---

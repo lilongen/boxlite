@@ -2,8 +2,7 @@
 
 Concise design of the runner add / scale-down implementation in this branch.
 For the operator runbook see [runner-ops-api-runbook.md](./runner-ops-api-runbook.md);
-for live E2E results see the `*-e2e-*.md` files; historical PoC notes are in
-[scale-down-design.md](./scale-down-design.md).
+for live E2E results see the `*-e2e-*.md` files.
 
 ## 1. Goal & scope
 
@@ -245,7 +244,7 @@ runner IAM role's S3 policy covering that bucket (`arn:aws:s3:::boxlite-volume-*
 the ② FFI symbols **and** the ③ Go SDK (via the ⑤ replace) **and** contains the
 ④ real `CreateBackup`. The released `v0.9.5` was compiled before ②/④ landed, so
 it is a stub — re-cutting it (Build C SDK → Build Runner from current source) is
-the [正路](../follow-ups/runner-backup-not-in-released-runner.md).
+the [re-cut-release fix](../follow-ups/runner-backup-not-in-released-runner.md).
 
 ## 11. Adopting Daytona's native `draining` pipeline (alternative to §5)
 

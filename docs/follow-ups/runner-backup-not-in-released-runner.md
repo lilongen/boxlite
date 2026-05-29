@@ -82,7 +82,7 @@ The real-AWS run validated everything up to the runner-side backup:
   (sst.config.ts). Dev has **`boxlite-volume-backups-dev`** for this.
 - AND the runner binary must actually implement backup (this is the blocker).
 
-## VALIDATED 2026-05-27 (测试快路: custom-built runner) — migration works end to end
+## VALIDATED 2026-05-27 (fast path: custom-built runner) — migration works end to end
 
 Built a backup-capable `boxlite-runner-linux-amd64` from current source on a
 throwaway x86_64 Ubuntu EC2 (`make guest` + `make runtime` + `cargo build
@@ -115,7 +115,7 @@ backup are correct from current source — the only gap is the released artifact
 2. The released runner lacks backup (root cause below) — the actual blocker
    (needs a backup-capable runner release; the binary builds fine from source).
 
-## Fix — 正路 (re-cut the runner release from current source)
+## Fix — the proper path (re-cut the runner release from current source)
 
 The runner release is a **two-stage chain** (`build-runner-binary.yml`): it
 downloads the prebuilt **`boxlite-c-v<ver>-linux-x64-gnu`** archive (→
