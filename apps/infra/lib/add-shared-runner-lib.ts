@@ -54,7 +54,7 @@ function checkAborted(signal: AbortSignal | undefined): void {
 
 async function apiFetch<T>(
   opts: ApiClientOpts,
-  method: 'GET' | 'POST' | 'DELETE',
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   apiPath: string,
   body?: unknown,
   signal?: AbortSignal,
@@ -287,6 +287,15 @@ export async function* addSharedRunner(
     }
     if (runnerId) {
       try {
+        // The runner row is created schedulable; DELETE returns 428 ("available
+        // for scheduling") unless we cordon it first (same order scale-down uses).
+        await apiFetch<unknown>(
+          api,
+          'PATCH',
+          `/api/admin/runners/${runnerId}/scheduling`,
+          { unschedulable: true },
+          undefined,
+        )
         await apiFetch<unknown>(api, 'DELETE', `/api/admin/runners/${runnerId}`, undefined, undefined)
         yield { type: 'warning', line: `cleanup: deleted orphan runner row ${runnerId}` }
       } catch (ce: any) {

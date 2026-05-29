@@ -66,6 +66,7 @@ describe('addSharedRunner generator', () => {
     mockFetch
       .mockResolvedValueOnce(okResponse({ id: 'u-1', role: 'admin' })) // probe auth
       .mockResolvedValueOnce(okResponse({ id: 'r-1', name: 'r', apiKey: 'k', region: 'us' })) // POST create
+      .mockResolvedValueOnce(okResponse({})) // cleanup PATCH scheduling (cordon)
       .mockResolvedValueOnce(okResponse({})) // cleanup DELETE /admin/runners/r-1
     const provider = fakeProvider()
     ;(provider.provisionRunner as jest.Mock).mockRejectedValueOnce(new Error('RunInstances denied') as never)
@@ -97,6 +98,7 @@ describe('addSharedRunner generator', () => {
     mockFetch
       .mockResolvedValueOnce(okResponse({ id: 'u-1', role: 'admin' })) // probe auth
       .mockResolvedValueOnce(okResponse({ id: 'r-1', name: 'r', apiKey: 'k', region: 'us' })) // POST create
+      .mockResolvedValueOnce(okResponse({})) // cleanup PATCH scheduling (cordon)
       .mockResolvedValueOnce(okResponse({})) // cleanup DELETE
     const provider = fakeProvider()
     // Abort right after provisioning so the next checkAborted unwinds into cleanup.
