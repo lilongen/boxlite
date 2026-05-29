@@ -327,6 +327,12 @@ func (c *Client) createFromBackupArchive(ctx context.Context, sandboxDto dto.Cre
 // a sandbox referenced by the given backup ref. Used by InspectImageInRegistry
 // to satisfy apps/api's pre-restore "does this exist?" check without a Docker
 // registry round-trip. Returns ETag (as digest) + Content-Length.
+//
+// Because the archive is latest-only (see resolveBackupLocation), ANY backup
+// ref of a sandbox resolves to the same single object — so this reports "exists"
+// for every historical ref as long as one backup exists. apps/api's newest-first
+// existence probe therefore always matches the newest ref and restores the
+// latest archive; it never reaches (and cannot honor) an older ref.
 func (c *Client) inspectBackupArchiveInS3(ctx context.Context, snapshotRef string) (string, int64, error) {
 	sandboxId := extractSandboxIdFromBackupRef(snapshotRef)
 	if sandboxId == "" {
@@ -380,6 +386,19 @@ func extractSandboxIdFromBackupRef(ref string) string {
 
 // resolveBackupLocation extracts the S3 (bucket,key) tuple for an archive,
 // from either an `s3://` URL or by combining BOXLITE_BACKUPS_BUCKET + <id>.boxlite.
+//
+// LATEST-ONLY semantics (deliberate, MVP scope): the key is keyed solely by
+// sandbox id (no timestamp), so each CreateBackup OVERWRITES the previous
+// archive — exactly one `.boxlite` object per sandbox is retained. apps/api
+// mints timestamped refs (`backup-<id>:<ts>`) and keeps a history list
+// (`existingBackupSnapshots`) whose "fall back to an older backup" loop in
+// sandbox-start.action.ts is therefore a NO-OP on BoxLite runners: every
+// historical ref of a sandbox resolves to the same single object, so the most
+// recent backup is always what gets restored. This is correct for the only
+// uses today (start-after-stop and scale-down migration both want the latest)
+// but means there is no point-in-time restore / corrupt-latest fallback.
+// Introducing those would require a timestamped key + a retention/cleanup
+// policy + aligning apps/api's ref selection — out of scope here.
 func (c *Client) resolveBackupLocation(sandboxId, ref string) (string, string, error) {
 	if strings.HasPrefix(ref, "s3://") {
 		trimmed := strings.TrimPrefix(ref, "s3://")

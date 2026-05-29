@@ -108,6 +108,17 @@ Backup needs both `BOXLITE_BACKUPS_BUCKET` set on the runner **and** a
 backup-capable runner binary (the FFI export). Bucket must match the runner IAM
 S3 policy (`arn:aws:s3:::boxlite-volume-*`); dev uses `boxlite-volume-backups-dev`.
 
+**Latest-only backup (MVP scope).** The S3 key is `<sandbox-id>.boxlite` with no
+timestamp, so each backup overwrites the prior one — exactly one archive per
+sandbox. apps/api still mints timestamped refs (`backup-<id>:<ts>`) and keeps an
+`existingBackupSnapshots` history with a "fall back to an older backup" loop, but
+on BoxLite runners that loop is a no-op: every historical ref resolves to the
+same object, so a restore always returns the latest archive. This is correct for
+the only paths today (start-after-stop and scale-down migration both want the
+latest) but provides **no point-in-time restore and no corrupt-latest fallback**.
+Adding either requires a timestamped key + a retention/cleanup policy + aligning
+apps/api's ref selection — deferred until a real PITR requirement exists.
+
 
 ## 7. Providers & config
 
