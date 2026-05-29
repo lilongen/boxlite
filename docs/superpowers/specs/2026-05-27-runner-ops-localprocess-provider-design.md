@@ -4,7 +4,7 @@
 **Scope:** P0 #1 (`IInfraProvider` abstraction + `LocalProcessInfraProvider`) + #2 (cargoTomlPath bug) + #3 (scale-down dryRun no-peer semantics). P0 #4 (error recovery: force-detach + target-runner-id) is a sequenced follow-on, NOT in this spec.
 **Branch:** `feat/cloud-mvp-runner-auto-scaling` (feature) — build/test via the converged `integration/infra-local-and-runner-scale` worktree or the runner-scaling worktree (which has submodules + the built backup runner stack).
 **Predecessors:**
-- `docs/superpowers/specs/2026-05-25-runner-ops-admin-ui-design.md` (the runner-ops wrapper)
+- `docs/runner-scaling/runner-ops-api-runbook.md` (the runner-ops server-side wrapper / API)
 - `docs/runner-scaling/runner-scale-design.md` (10-stage scale-down + backup FFI)
 - memory `project_runner_ops_curl_on_infra_local` (Phase A/B validation, infra-local component facts)
 

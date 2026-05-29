@@ -1,7 +1,7 @@
 # Follow-up: Restore Jest unit-test infrastructure
 
 **Filed:** 2026-05-25
-**Surfaced by:** Runner Ops Admin UI implementation (see `docs/superpowers/plans/2026-05-25-runner-ops-admin-ui.md`)
+**Surfaced by:** Runner Ops work (during the dashboard-UI prototype, since dropped)
 **Owner:** TBD
 **Priority:** Medium — blocks proper TDD discipline for any new unit tests; manual e2e currently covers behavioural verification.
 
@@ -95,8 +95,7 @@ fixed (Option A above). This is the third symptom of the same root cause
 
 Unit tests written via Jest cannot execute. The following PRs/work merged a `*.spec.ts` file that is currently not exercised in CI:
 
-- `feat(api): expose SystemRole on UserDto so dashboard can gate admin` (`b2be375d`) — `apps/api/src/user/dto/__tests__/user.dto.spec.ts` (well-formed, awaiting jest restore)
-- The 17-task Runner Ops Admin UI plan (`docs/superpowers/plans/2026-05-25-runner-ops-admin-ui.md`) writes additional spec files in 10+ tasks; all are gated behind this fix.
+- `feat(api): expose SystemRole on UserDto` (`b2be375d`) — `apps/api/src/user/dto/__tests__/user.dto.spec.ts` (well-formed, awaiting jest restore)
 
 ## Recommended next step
 

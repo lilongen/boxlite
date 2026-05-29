@@ -1,9 +1,8 @@
 # Runner Ops API Runbook (curl)
 
-> Current scope: **server-side wrapper + curl only**. The dashboard UI was
-> deferred — see the status note in
-> `docs/superpowers/specs/2026-05-25-runner-ops-admin-ui-design.md`. A dedicated
-> page will connect to these same endpoints later.
+> Current scope: **server-side wrapper + curl only**. A dashboard UI was
+> prototyped on this branch but dropped; the curl/API surface below is the
+> validated path.
 
 ## What this is
 
