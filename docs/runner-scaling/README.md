@@ -41,6 +41,7 @@ sidecar), installs the `boxlite` CLI, and honors `BOXLITE_RUNNER_RELEASE_REPO` /
 | [aws-scale-down-e2e-2026-05-27.md](./aws-scale-down-e2e-2026-05-27.md) | real-AWS provision/terminate + empty-runner scale-down |
 | [aws-migration-e2e-2026-05-28.md](./aws-migration-e2e-2026-05-28.md) | real-AWS scale-down **with live box migration** (CLI path) |
 | [api-endpoint-e2e-2026-05-28.md](./api-endpoint-e2e-2026-05-28.md) | add + scale-down **via the runner-ops API endpoints** (incl. B-tier migration) |
+| [api-endpoint-e2e-2026-05-29-review-fixes.md](./api-endpoint-e2e-2026-05-29-review-fixes.md) | API-endpoint re-run validating the round-2 review fixes (masked apiKey, real cancel, lock renewal) |
 
 Related follow-ups: [released runner lacks backup](../follow-ups/runner-backup-not-in-released-runner.md),
 [migration bystander recreate race](../follow-ups/runner-migration-bystander-recreate-race.md),
