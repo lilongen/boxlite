@@ -168,6 +168,7 @@ export async function* addSharedRunner(
 
   const api: ApiClientOpts = { baseUrl: apiUrl, token: adminToken }
   let runnerId: string | null = null
+  let provisioned = false
 
   try {
     // ─── Stage 1: verify admin token ─────────────────────────────────────
@@ -209,9 +210,11 @@ export async function* addSharedRunner(
       instanceType,
       diskGb,
     })
-    const hostEndpoint = prov.endpoint ?? ''
-    yield { type: 'data', key: 'ec2InstanceId', value: hostEndpoint }
-    yield { type: 'log', line: `→ host provisioned${hostEndpoint ? `: ${hostEndpoint}` : ''}` }
+    provisioned = true
+    const ec2InstanceId = prov.instanceId ?? ''
+    const privateIp = prov.endpoint || undefined
+    yield { type: 'data', key: 'ec2InstanceId', value: ec2InstanceId }
+    yield { type: 'log', line: `→ host provisioned${ec2InstanceId ? `: ${ec2InstanceId}` : ''}${privateIp ? ` (${privateIp})` : ''}` }
 
     // ─── Stage 5: host launched ─────────────────────────────────────────
     yield { type: 'stage', stage: 5, total: 7, label: 'Runner host launched' }
@@ -225,8 +228,8 @@ export async function* addSharedRunner(
         runnerId,
         runnerName,
         apiKey: runnerApiKey,
-        ec2InstanceId: hostEndpoint,
-        privateIp: hostEndpoint || undefined,
+        ec2InstanceId,
+        privateIp,
         finalState: 'INITIALIZING',
       }
     }
@@ -249,8 +252,8 @@ export async function* addSharedRunner(
         runnerId,
         runnerName,
         apiKey: runnerApiKey,
-        ec2InstanceId: hostEndpoint,
-        privateIp: hostEndpoint || undefined,
+        ec2InstanceId,
+        privateIp,
         finalState: 'READY',
       }
     } else {
@@ -262,12 +265,34 @@ export async function* addSharedRunner(
         runnerId,
         runnerName,
         apiKey: runnerApiKey,
-        ec2InstanceId: hostEndpoint,
-        privateIp: hostEndpoint || undefined,
+        ec2InstanceId,
+        privateIp,
         finalState: 'TIMEOUT',
       }
     }
   } catch (e: any) {
+    // Best-effort teardown of partial state: a failed or cancelled add must not
+    // leak a half-created runner. Remove the orphan row, and terminate the host
+    // if it was provisioned. Uses no AbortSignal so a cancel can't block its own
+    // cleanup, and swallows its own errors so it never masks the original `e`.
+    // (A slow-but-coming-up runner returns finalState:'TIMEOUT' — a normal
+    // return, not a throw — so it never reaches here and is left intact.)
+    if (provisioned && runnerId) {
+      try {
+        await provider.terminateRunner(runnerId)
+        yield { type: 'warning', line: `cleanup: terminated provisioned host for runner ${runnerId}` }
+      } catch (ce: any) {
+        yield { type: 'warning', line: `cleanup: terminate host failed: ${ce?.message ?? ce}` }
+      }
+    }
+    if (runnerId) {
+      try {
+        await apiFetch<unknown>(api, 'DELETE', `/api/admin/runners/${runnerId}`, undefined, undefined)
+        yield { type: 'warning', line: `cleanup: deleted orphan runner row ${runnerId}` }
+      } catch (ce: any) {
+        yield { type: 'warning', line: `cleanup: delete runner row failed: ${ce?.message ?? ce}` }
+      }
+    }
     if (e instanceof OperationAbortedError) {
       throw e
     }

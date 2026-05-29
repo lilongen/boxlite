@@ -96,7 +96,7 @@ export class AwsInfraProvider implements IInfraProvider {
       privateIp = inst?.PrivateIpAddress ?? privateIp
       if (inst?.State?.Name === 'running') break
     }
-    return { endpoint: privateIp ?? undefined }
+    return { endpoint: privateIp ?? undefined, instanceId: instance.InstanceId }
   }
 
   async terminateRunner(runnerId: string): Promise<void> {

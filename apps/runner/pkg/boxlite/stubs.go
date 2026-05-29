@@ -214,6 +214,13 @@ func (c *Client) backupS3Client() (*minio.Client, error) {
 	}
 
 	endpoint := os.Getenv("BOXLITE_BACKUPS_ENDPOINT")
+	if endpoint == "" {
+		// Fall back to the runner's configured S3 endpoint (mirrors
+		// pkg/storage/minio_client.go) so a MinIO/LocalStack/dev setup that sets
+		// AWSEndpointUrl but not BOXLITE_BACKUPS_ENDPOINT doesn't silently send
+		// backups to real AWS. Empty on both → native AWS S3 (default below).
+		endpoint = c.awsEndpointUrl
+	}
 	useSSL := true
 	if endpoint != "" {
 		if strings.HasPrefix(endpoint, "http://") {

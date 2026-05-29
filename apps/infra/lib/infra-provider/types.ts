@@ -11,7 +11,11 @@ export interface RunnerHostSpec {
 }
 
 export interface ProvisionResult {
+  /** Reachable host endpoint (AWS: private IP; local: http://127.0.0.1:<port>). */
   endpoint?: string
+  /** Provider-native host id, when there is one (AWS: the EC2 instance id i-…).
+   *  Undefined for the local process provider. */
+  instanceId?: string
 }
 
 export interface DescribeResult {
