@@ -57,7 +57,7 @@ export function buildRunnerUserData(input: RunnerUserDataInput): string {
   // It's NOT a service — the runner does backup/restore in-process via the
   // libboxlite.a FFI (the original `boxlite serve` systemd sidecar was retired
   // because BoxliteRuntime needs an exclusive lock on BOXLITE_HOME — see
-  // docs/runner-scaling/scale-down-design.md §11.5).
+  // docs/runner-scaling/runner-scale-design.md §10).
   const cliInstallFragment = `
 # ── boxlite CLI install (debug-only, no systemd service) ──────────────────
 curl -fsSL "https://github.com/${releaseRepo}/releases/download/v${RUNNER_VERSION}/boxlite-cli-v${RUNNER_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /usr/local/bin/

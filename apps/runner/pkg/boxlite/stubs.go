@@ -116,7 +116,7 @@ func (c *Client) RecoverSandbox(ctx context.Context, sandboxId string, recoverDt
 //
 // Implementation: in-process Export via the Go SDK's new Box.Export binding
 // (which calls libboxlite.a's boxlite_box_export). Replaces the original
-// sidecar-HTTP approach — see docs/runner-scaling/scale-down-design.md §11.5
+// sidecar-HTTP approach — see docs/runner-scaling/runner-scale-design.md §10
 // for why the sidecar can't coexist with the runner's runtime (BoxliteRuntime
 // holds an exclusive lock on BOXLITE_HOME).
 //
@@ -242,12 +242,29 @@ func (c *Client) backupS3Client() (*minio.Client, error) {
 // isBackupRef returns true when the snapshot reference points to a `.boxlite`
 // archive backup, not a regular OCI image. Two shapes are accepted:
 //   - `s3://<bucket>/<key>`               — explicit S3 URL
-//   - `<registry>/.../backup-<id>:<ts>`   — apps/api `backupSnapshot` convention
+//   - `<registry>/<project>/backup-<id>:<ts>` — apps/api `backupSnapshot` convention
 //
-// See apps/api/src/sandbox/managers/backup.manager.ts where the `backup-<id>`
-// prefix is minted, and docs/runner-scaling/scale-down-design.md for context.
+// The `backup-` marker is anchored to the image *name* (the final path segment,
+// before the tag), NOT matched anywhere in the ref. Using strings.Contains(ref,
+// "/backup-") would mis-classify a normal image whose registry/project segment
+// happens to start with `backup-` (e.g. `reg.io/backup-team/myimage:1`) as a
+// backup archive and route it to the S3 restore path. This mirrors the parsing
+// in extractSandboxIdFromBackupRef. See apps/api/src/sandbox/managers/
+// backup.manager.ts where the `backup-<id>` name is minted, and
+// docs/runner-scaling/runner-scale-design.md §6 for the migration data flow.
 func isBackupRef(snapshot string) bool {
-	return strings.HasPrefix(snapshot, "s3://") || strings.Contains(snapshot, "/backup-")
+	if strings.HasPrefix(snapshot, "s3://") {
+		return true
+	}
+	lastSlash := strings.LastIndexByte(snapshot, '/')
+	if lastSlash < 0 {
+		return false
+	}
+	name := snapshot[lastSlash+1:]
+	if colon := strings.IndexByte(name, ':'); colon >= 0 {
+		name = name[:colon]
+	}
+	return strings.HasPrefix(name, "backup-")
 }
 
 // createFromBackupArchive restores a sandbox from a `.boxlite` archive in S3.

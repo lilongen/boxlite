@@ -26,6 +26,29 @@ import { RunnerOpsJobStore } from './runner-ops-job-store'
 const ADD_LOCK_TTL = 1_800
 const SCALE_LOCK_TTL = 3_600
 
+// Result keys whose values are live credentials. The job record is persisted to
+// Redis for 24h and returned verbatim by GET /jobs/:id, so the full value must
+// never land there. The lib already emits a masked breadcrumb in the log lines
+// (e.g. "apiKey ab12…ef90"), which is all an operator needs from the API path.
+const SENSITIVE_RESULT_KEYS = new Set(['apiKey'])
+
+function maskSecret(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  if (value.length <= 8) return '***'
+  return `${value.slice(0, 4)}…${value.slice(-4)}`
+}
+
+/** Mask sensitive fields of a (possibly nested-free) result object before it is
+ *  persisted to the shared job store. Non-objects pass through unchanged. */
+function redactResult(result: unknown): unknown {
+  if (!result || typeof result !== 'object') return result
+  const out: Record<string, unknown> = { ...(result as Record<string, unknown>) }
+  for (const k of Object.keys(out)) {
+    if (SENSITIVE_RESULT_KEYS.has(k)) out[k] = maskSecret(out[k])
+  }
+  return out
+}
+
 @Injectable()
 export class RunnerOpsService {
   private readonly logger = new Logger(RunnerOpsService.name)
@@ -184,12 +207,17 @@ export class RunnerOpsService {
 
   private async pumpAdd(id: string, opts: AddSharedRunnerOpts): Promise<void> {
     let currentStage = 0
+    // Wire a real cancel + lock heartbeat to the generator. The lib calls
+    // checkAborted(opts.signal) at every stage, so aborting here unwinds it.
+    const controller = new AbortController()
+    opts.signal = controller.signal
     try {
       const gen = this.runAddSharedRunner(opts)
       while (true) {
+        await this.heartbeatAndMaybeCancel('add-shared', id, ADD_LOCK_TTL, controller)
         const next = await gen.next()
         if (next.done) {
-          await this.store.complete(id, next.value)
+          await this.store.complete(id, redactResult(next.value))
           break
         }
         await this.applyEvent(id, next.value as ProgressEvent, (s) => {
@@ -197,9 +225,14 @@ export class RunnerOpsService {
         })
       }
     } catch (e) {
-      const msg = (e as Error)?.message ?? String(e)
-      this.logger.error(`add-shared job ${id} failed: ${msg}`)
-      await this.store.fail(id, msg, currentStage || undefined)
+      if (controller.signal.aborted) {
+        this.logger.log(`add-shared job ${id} cancelled at stage ${currentStage}`)
+        await this.store.markCancelled(id, currentStage || undefined)
+      } else {
+        const msg = (e as Error)?.message ?? String(e)
+        this.logger.error(`add-shared job ${id} failed: ${msg}`)
+        await this.store.fail(id, msg, currentStage || undefined)
+      }
     } finally {
       await this.store.releaseLock('add-shared', id)
     }
@@ -207,12 +240,15 @@ export class RunnerOpsService {
 
   private async pumpScaleDown(id: string, opts: ScaleDownOpts): Promise<void> {
     let currentStage = 0
+    const controller = new AbortController()
+    opts.signal = controller.signal
     try {
       const gen = this.runScaleDownRunner(opts)
       while (true) {
+        await this.heartbeatAndMaybeCancel('scale-down', id, SCALE_LOCK_TTL, controller)
         const next = await gen.next()
         if (next.done) {
-          await this.store.complete(id, next.value)
+          await this.store.complete(id, redactResult(next.value))
           break
         }
         await this.applyEvent(id, next.value as ProgressEvent, (s) => {
@@ -220,11 +256,32 @@ export class RunnerOpsService {
         })
       }
     } catch (e) {
-      const msg = (e as Error)?.message ?? String(e)
-      this.logger.error(`scale-down job ${id} failed: ${msg}`)
-      await this.store.fail(id, msg, currentStage || undefined)
+      if (controller.signal.aborted) {
+        this.logger.log(`scale-down job ${id} cancelled at stage ${currentStage}`)
+        await this.store.markCancelled(id, currentStage || undefined)
+      } else {
+        const msg = (e as Error)?.message ?? String(e)
+        this.logger.error(`scale-down job ${id} failed: ${msg}`)
+        await this.store.fail(id, msg, currentStage || undefined)
+      }
     } finally {
       await this.store.releaseLock('scale-down', id)
+    }
+  }
+
+  /** Per-step housekeeping run before each generator advance: (1) renew the
+   *  platform lock so a long-but-live op never expires it, and (2) abort the
+   *  generator if an operator has requested cancel. Aborting makes the lib's
+   *  next checkAborted(signal) throw, unwinding into the cancel branch. */
+  private async heartbeatAndMaybeCancel(
+    kind: 'add-shared' | 'scale-down',
+    id: string,
+    ttlSec: number,
+    controller: AbortController,
+  ): Promise<void> {
+    await this.store.renewLock(kind, id, ttlSec)
+    if (!controller.signal.aborted && (await this.store.isCancelRequested(id))) {
+      controller.abort()
     }
   }
 
@@ -237,7 +294,8 @@ export class RunnerOpsService {
     } else if (ev.type === 'warning') {
       await this.store.appendLine(jobId, `WARN: ${ev.line}`)
     } else if (ev.type === 'data') {
-      await this.store.setResultField(jobId, ev.key, ev.value)
+      const value = SENSITIVE_RESULT_KEYS.has(ev.key) ? maskSecret(ev.value) : ev.value
+      await this.store.setResultField(jobId, ev.key, value)
     }
   }
 }

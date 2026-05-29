@@ -154,8 +154,9 @@ func (c *Client) Close() error {
 // Special case: if `sandboxDto.Snapshot` is a backup reference (the apps/api
 // `backupSnapshot` field, shape `<registry>/<project>/backup-<id>:<ts>` or
 // `s3://<bucket>/<key>`), this dispatches to createFromBackupArchive which
-// restores the box from a `.boxlite` archive in S3 via the local sidecar.
-// This is the migration path used by docs/runner-scaling/scale-down-design.md.
+// restores the box from a `.boxlite` archive in S3 via the in-process
+// Runtime.ImportBox FFI (no sidecar). This is the migration path described in
+// docs/runner-scaling/runner-scale-design.md §5.
 func (c *Client) Create(ctx context.Context, sandboxDto dto.CreateSandboxDTO) (string, string, error) {
 	if isBackupRef(sandboxDto.Snapshot) {
 		return c.createFromBackupArchive(ctx, sandboxDto)

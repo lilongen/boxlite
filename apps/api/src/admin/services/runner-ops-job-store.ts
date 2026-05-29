@@ -18,6 +18,7 @@ export type JobStatus =
   | 'SUCCESS'
   | 'FAILED'
   | 'CANCEL_REQUESTED'
+  | 'CANCELLED'
   | 'STALE'
 
 export type JobKind = 'add-shared' | 'scale-down'
@@ -146,6 +147,22 @@ export class RunnerOpsJobStore {
     })
   }
 
+  /** True once an operator has POSTed /cancel and the job is still in-flight.
+   *  Polled by the pump loop between generator steps to abort cooperatively. */
+  async isCancelRequested(id: string): Promise<boolean> {
+    const rec = await this.get(id)
+    return rec?.status === 'CANCEL_REQUESTED'
+  }
+
+  /** Terminal state when a cancel request was honored mid-flight. */
+  async markCancelled(id: string, stage?: number): Promise<void> {
+    await this.update(id, (rec) => {
+      rec.status = 'CANCELLED'
+      rec.finishedAt = new Date().toISOString()
+      rec.error = { message: 'job cancelled by operator', stage }
+    })
+  }
+
   async tryAcquireLock(
     kind: JobKind,
     jobId: string,
@@ -160,5 +177,22 @@ export class RunnerOpsJobStore {
     const lockKey = `runner-ops:lock:${kind}`
     const current = await this.redis.get(lockKey)
     if (current === jobId) await this.redis.del(lockKey)
+  }
+
+  /** Extend our lock's TTL — only if we still hold it. Called as a heartbeat on
+   *  each progress event so a long-but-live op (slow EC2 provision / migration)
+   *  never has its lock expire underneath it, while a hung/dead job stops
+   *  renewing and lets the lock auto-release at TTL. Atomic check-and-extend so
+   *  we never extend a lock another job has since acquired. */
+  async renewLock(kind: JobKind, jobId: string, ttlSec: number): Promise<boolean> {
+    const lockKey = `runner-ops:lock:${kind}`
+    const res = await this.redis.eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end",
+      1,
+      lockKey,
+      jobId,
+      String(ttlSec),
+    )
+    return res === 1
   }
 }

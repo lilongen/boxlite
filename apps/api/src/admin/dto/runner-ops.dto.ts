@@ -68,7 +68,14 @@ export class ScaleDownRequestDto {
   maxWaitStartSec?: number
 }
 
-export type JobStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'CANCEL_REQUESTED' | 'STALE'
+export type JobStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'SUCCESS'
+  | 'FAILED'
+  | 'CANCEL_REQUESTED'
+  | 'CANCELLED'
+  | 'STALE'
 
 @ApiSchema({ name: 'JobError' })
 export class JobErrorDto {
@@ -80,7 +87,7 @@ export class JobErrorDto {
 export class JobDto {
   @ApiProperty() id: string
   @ApiProperty({ enum: ['add-shared', 'scale-down'] }) kind: 'add-shared' | 'scale-down'
-  @ApiProperty({ enum: ['PENDING', 'RUNNING', 'SUCCESS', 'FAILED', 'CANCEL_REQUESTED', 'STALE'] })
+  @ApiProperty({ enum: ['PENDING', 'RUNNING', 'SUCCESS', 'FAILED', 'CANCEL_REQUESTED', 'CANCELLED', 'STALE'] })
   status: JobStatus
   @ApiProperty() startedAt: string
   @ApiPropertyOptional() finishedAt?: string

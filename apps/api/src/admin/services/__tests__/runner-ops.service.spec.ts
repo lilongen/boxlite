@@ -48,6 +48,17 @@ class FakeStore {
     const j = this.jobs.get(id)
     if (j?.status === 'RUNNING') j.status = 'CANCEL_REQUESTED'
   }
+  async isCancelRequested(id: string) {
+    return this.jobs.get(id)?.status === 'CANCEL_REQUESTED'
+  }
+  async markCancelled(id: string, stage?: number) {
+    const j = this.jobs.get(id)!
+    j.status = 'CANCELLED'
+    j.error = { message: 'job cancelled by operator', stage }
+  }
+  async renewLock(_kind: any, id: string) {
+    return this.lock === id
+  }
   async get(id: string) {
     return this.jobs.get(id) ?? null
   }
@@ -123,7 +134,32 @@ describe('RunnerOpsService', () => {
     await new Promise((r) => setTimeout(r, 80))
     const rec = store.jobs.get(j.id)
     expect(rec.lines).toEqual(['[1/2] first', 'doing work', '[2/2] second'])
-    expect(rec.result).toMatchObject({ apiKey: 'secret-key', runnerId: 'r1' })
+    // apiKey is a live credential — the persisted result must carry only a
+    // masked breadcrumb (prefix…suffix), never the full secret.
+    expect(rec.result).toMatchObject({ apiKey: 'secr…-key', runnerId: 'r1' })
+    expect(rec.result.apiKey).not.toBe('secret-key')
     expect(rec.status).toBe('SUCCESS')
+  })
+
+  it('cooperatively cancels an in-flight job', async () => {
+    const { service, store } = await makeService({
+      // Long-running generator that honors the AbortSignal the service wires in.
+      runAddSharedRunner: (opts: any) =>
+        (async function* () {
+          yield { type: 'stage', stage: 1, total: 2, label: 'first' }
+          for (let i = 0; i < 100; i++) {
+            if (opts.signal?.aborted) throw new Error('aborted')
+            await new Promise((r) => setTimeout(r, 10))
+            yield { type: 'log', line: `tick ${i}` }
+          }
+          return { runnerId: 'r1' } as any
+        })(),
+    } as any)
+    const j = await service.startAddSharedRunner({})
+    await new Promise((r) => setTimeout(r, 30))
+    await service.requestCancel(j.id)
+    await new Promise((r) => setTimeout(r, 120))
+    expect(store.jobs.get(j.id)?.status).toBe('CANCELLED')
+    expect(store.jobs.get(j.id)?.error?.message).toMatch(/cancelled/)
   })
 })

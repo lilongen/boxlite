@@ -92,4 +92,27 @@ describe('RunnerOpsJobStore', () => {
     const blocked = await store.tryAcquireLock('scale-down', 'jC', 60)
     expect(blocked).toBe(false)
   })
+
+  it('renewLock extends only the holder, not a stranger', async () => {
+    await store.tryAcquireLock('add-shared', 'owner', 60)
+    expect(await store.renewLock('add-shared', 'owner', 120)).toBe(true)
+    // A non-holder cannot extend (and thus cannot keep a lock it never had).
+    expect(await store.renewLock('add-shared', 'stranger', 120)).toBe(false)
+    // Lock is still held by the owner afterwards.
+    expect(await store.tryAcquireLock('add-shared', 'other', 60)).toBe(false)
+  })
+
+  it('cancel lifecycle: request -> isCancelRequested -> markCancelled', async () => {
+    await store.create({ id: 'jc', kind: 'add-shared', startedAt: new Date().toISOString() })
+    expect(await store.isCancelRequested('jc')).toBe(false)
+    await store.requestCancel('jc')
+    expect(await store.isCancelRequested('jc')).toBe(true)
+    await store.markCancelled('jc', 3)
+    const job = await store.get('jc')
+    expect(job?.status).toBe('CANCELLED')
+    expect(job?.error).toEqual({ message: 'job cancelled by operator', stage: 3 })
+    expect(job?.finishedAt).toBeTruthy()
+    // Once terminal, it no longer reports a pending cancel request.
+    expect(await store.isCancelRequested('jc')).toBe(false)
+  })
 })

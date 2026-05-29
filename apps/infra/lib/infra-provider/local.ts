@@ -115,7 +115,14 @@ export class LocalProcessInfraProvider implements IInfraProvider {
   private readMeta(runnerId: string): RunnerMeta | null {
     const p = this.metaPath(runnerId)
     if (!existsSync(p)) return null
-    return JSON.parse(readFileSync(p, 'utf-8')) as RunnerMeta
+    const raw = readFileSync(p, 'utf-8')
+    try {
+      return JSON.parse(raw) as RunnerMeta
+    } catch (e) {
+      // A truncated/corrupt meta.json (e.g. the runner process died mid-write)
+      // would otherwise surface as a bare SyntaxError with no path context.
+      throw new Error(`local provider: corrupt runner meta at ${p}: ${(e as Error).message}`)
+    }
   }
 
   private pidAlive(pid: number): boolean {
