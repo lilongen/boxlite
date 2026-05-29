@@ -82,6 +82,8 @@ fn build_e2fsprogs(vendor_dir: &Path, build_dir: &Path) {
     let jobs = num_cpus::get().to_string();
 
     // Build libs (required for tools)
+    // Build-stability fix (unrelated to box backup/restore): the libs build is
+    // serialized to dodge a parallel-make codegen race — see NOTE below.
     // NOTE: serial (-j1) — the ext2fs crc32 tables are code-generated at build
     // time (gen_crc32ctable → crc32c_table.h); the vendored Makefile does not
     // declare crc32c.c's dependency on that generated header, so parallel make
