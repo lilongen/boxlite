@@ -465,7 +465,24 @@ async function main(): Promise<number> {
       result.setCordoned();
       result.setArchived();
       result.setMigrated();
-      result.setRowDeleted();
+      const failures: string[] = finalResult.migrationFailures ?? [];
+      if (failures.length > 0) {
+        // Source was intentionally NOT destroyed so the boxes stay recoverable;
+        // report a failure rather than a green result for a partial outage.
+        result.fail(
+          `${failures.length} sandbox(es) failed to restart on a peer: ${failures.join(", ")}. ` +
+            `Source runner ${finalResult.runnerId} kept (row + host) for recovery.`,
+        );
+        result.flush();
+        process.stderr.write(
+          `\nMIGRATION FAILED: ${failures.length} sandbox(es) did not restart on a peer; ` +
+            `source kept for recovery. Result file: ${args.resultFile}\n`,
+        );
+        return EXIT.MIGRATION_FAILED;
+      }
+      if (finalResult.runnerRowDeleted) {
+        result.setRowDeleted();
+      }
       if (args.skipEc2Terminate) {
         result.setStage("EC2_TERMINATED");
       } else {

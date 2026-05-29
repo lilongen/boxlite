@@ -162,4 +162,33 @@ describe('RunnerOpsService', () => {
     expect(store.jobs.get(j.id)?.status).toBe('CANCELLED')
     expect(store.jobs.get(j.id)?.error?.message).toMatch(/cancelled/)
   })
+
+  it('deep-redacts runner credentials in scale-down result data (sourceApiKey, peers[].apiKey)', async () => {
+    const { service, store } = await makeService({
+      runScaleDownRunner: () =>
+        (async function* () {
+          yield { type: 'data', key: 'sourceApiKey', value: 'dtn_supersecretvalue1234' }
+          yield { type: 'data', key: 'peers', value: [{ id: 'r2', name: 'p', apiKey: 'dtn_peerkeyabcdefgh' }] }
+          yield { type: 'data', key: 'peerCount', value: 1 }
+          return {
+            runnerId: 'r1',
+            sandboxesMigrated: [],
+            sandboxesArchived: [],
+            migrationFailures: [],
+            ec2InstancesTerminated: [],
+            runnerRowDeleted: true,
+          } as any
+        })(),
+    } as any)
+    const j = await service.startScaleDownRunner('r1', {})
+    await new Promise((r) => setTimeout(r, 80))
+    const rec = store.jobs.get(j.id)
+    // No live credential survives at any depth in the persisted job record.
+    expect(rec.result.sourceApiKey).toBe('dtn_…1234')
+    expect(rec.result.sourceApiKey).not.toContain('supersecret')
+    expect(rec.result.peers[0].apiKey).toBe('dtn_…efgh')
+    expect(rec.result.peers[0].apiKey).not.toContain('peerkey')
+    expect(rec.result.peers[0].id).toBe('r2') // non-sensitive fields preserved
+    expect(rec.status).toBe('SUCCESS')
+  })
 })

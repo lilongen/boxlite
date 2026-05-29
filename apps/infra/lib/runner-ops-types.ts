@@ -59,7 +59,15 @@ export interface ScaleDownResult {
   runnerId: string
   sandboxesMigrated: string[]
   sandboxesArchived: string[]
+  /** Sandboxes that were STARTED on the source but failed to restart on a peer
+   *  (their backups exist in S3, but they are currently down). Non-empty means
+   *  the scale-down did NOT complete cleanly: the source row + host are kept so
+   *  the boxes remain recoverable. Callers must treat this as a failure. */
+  migrationFailures: string[]
   ec2InstancesTerminated: string[]
+  /** Whether the source runner row was actually deleted (skipped on migration
+   *  failure or dryRun). */
+  runnerRowDeleted: boolean
   durationMs: number
 }
 

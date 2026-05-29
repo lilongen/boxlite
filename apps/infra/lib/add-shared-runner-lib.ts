@@ -69,6 +69,7 @@ async function apiFetch<T>(
       Accept: 'application/json',
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   })
   const text = await res.text()
   if (!res.ok) {
@@ -130,7 +131,7 @@ async function pollUntilReady(
   while (Date.now() < deadline) {
     checkAborted(signal)
     try {
-      const r = await apiFetch<RunnerFullDto>(api, 'GET', `/api/admin/runners/${runnerId}`)
+      const r = await apiFetch<RunnerFullDto>(api, 'GET', `/api/admin/runners/${runnerId}`, undefined, signal)
       if (r.state === 'ready') return true
     } catch (e) {
       if (!(e instanceof ApiError) || e.status >= 500) {

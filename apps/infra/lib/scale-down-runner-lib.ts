@@ -84,6 +84,7 @@ async function apiFetch<T>(
       ...extraHeaders,
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   })
   const text = await res.text()
   if (!res.ok) throw new ApiError(res.status, text, method, apiPath)
@@ -128,6 +129,7 @@ async function listSandboxesOnRunner(
   const url = `${api.baseUrl.replace(/\/$/, '')}/api/sandbox/for-runner`
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${runnerApiKey}` },
+    signal,
   })
   if (!res.ok) throw new ApiError(res.status, await res.text(), 'GET', '/api/sandbox/for-runner')
   return (await res.json()) as SandboxDto[]
@@ -268,6 +270,7 @@ export async function* scaleDownRunner(
 
   const migrations: MigratedSandbox[] = []
   const ec2InstancesTerminated: string[] = []
+  let runnerRowDeleted = false
 
   try {
     // ─── [1/10] Preflight ─────────────────────────────────────────────────
@@ -303,15 +306,22 @@ export async function* scaleDownRunner(
       yield { type: 'log', line: `  - ${p.name} (${p.id})` }
     }
 
-    // Emit preflight data for CLI confirmation/result tracking
+    // Emit preflight data for CLI confirmation/result tracking.
+    // NB: never emit runner apiKeys as job data — the consumer (NestJS) persists
+    // result fields to Redis for 24h and serves them via GET /jobs/:id. The
+    // source apiKey is used only internally (listSandboxesOnRunner below); peers
+    // are emitted id/name/region only, with apiKey stripped.
     if (!src.apiKey) {
       throw new Error(`Source runner row is missing apiKey; cannot list sandboxes.`)
     }
-    yield { type: 'data', key: 'sourceApiKey', value: src.apiKey }
     yield { type: 'data', key: 'sourceRunnerName', value: src.name }
     yield { type: 'data', key: 'sourceRegion', value: src.region }
     yield { type: 'data', key: 'peerCount', value: peers.length }
-    yield { type: 'data', key: 'peers', value: peers }
+    yield {
+      type: 'data',
+      key: 'peers',
+      value: peers.map((p) => ({ id: p.id, name: p.name, region: p.region })),
+    }
 
     // #3: a scale-down with no peer in the region cannot migrate the boxes.
     // Assert BEFORE the dryRun early-return so dryRun correctly reports the
@@ -327,7 +337,9 @@ export async function* scaleDownRunner(
         runnerId: opts.runnerId,
         sandboxesMigrated: [],
         sandboxesArchived: [],
+        migrationFailures: [],
         ec2InstancesTerminated: [],
+        runnerRowDeleted: false,
         durationMs: Date.now() - start,
       }
     }
@@ -532,61 +544,85 @@ export async function* scaleDownRunner(
       yield { type: 'stage', stage: 7, total: 10, label: 'No sandboxes to restart' }
     }
 
-    // ─── [8/10] Wait runner drainable ──────────────────────────────────────
-    yield {
-      type: 'stage',
-      stage: 8,
-      total: 10,
-      label: 'Wait until source has 0 non-archived/destroyed sandboxes',
-    }
-    checkAborted(opts.signal)
-    const deadline8 = Date.now() + maxWaitDrainSec * 1000
-    let drainable = false
-    while (Date.now() < deadline8) {
-      const fresh = await getRunner(api, src.id, opts.signal)
-      if (fresh.currentStartedSandboxes === 0) {
-        drainable = true
-        break
+    // ─── Migration outcome gate ────────────────────────────────────────────
+    // If any STARTED box failed to restart on a peer, do NOT destroy the source:
+    // skip drain/DELETE/terminate so those boxes (whose backups are in S3) stay
+    // recoverable on the still-running source. Reported as a failure to callers.
+    const migrationFailures = migrations
+      .filter((m) => m.finalState === 'failed-to-restart')
+      .map((m) => m.id)
+
+    if (migrationFailures.length > 0) {
+      yield {
+        type: 'warning',
+        line:
+          `${migrationFailures.length} sandbox(es) failed to restart on a peer ` +
+          `(${migrationFailures.join(', ')}). Keeping source runner ${src.id} ` +
+          `(row + host) so they remain recoverable; skipping DELETE + terminate.`,
       }
-      await new Promise((r) => setTimeout(r, 5000))
-    }
-    if (!drainable) {
-      yield { type: 'warning', line: 'drain wait timed out; will try DELETE anyway.' }
-    }
-
-    // ─── [9/10] DELETE runner row ──────────────────────────────────────────
-    yield { type: 'stage', stage: 9, total: 10, label: `DELETE /api/admin/runners/${src.id}` }
-    checkAborted(opts.signal)
-    try {
-      await apiFetch<unknown>(api, 'DELETE', `/api/admin/runners/${src.id}`, undefined, {}, opts.signal)
-      yield { type: 'log', line: '✓ runner row deleted' }
-    } catch (e: unknown) {
-      const msg = (e as Error)?.message ?? String(e)
-      yield { type: 'log', line: `✗ DELETE failed: ${msg}` }
-      throw new Error(`DELETE runner: ${msg}`)
-    }
-
-    // ─── [10/10] Terminate runner host (via IInfraProvider) ───────────────
-    const skip = opts.skipTerminate ?? opts.skipEc2Terminate ?? false
-    if (skip) {
-      yield { type: 'stage', stage: 10, total: 10, label: 'skipTerminate: leaving runner host running' }
     } else {
-      yield { type: 'stage', stage: 10, total: 10, label: `Terminate runner host for ${src.id}` }
+      // ─── [8/10] Wait runner drainable ────────────────────────────────────
+      yield {
+        type: 'stage',
+        stage: 8,
+        total: 10,
+        label: 'Wait until source has 0 non-archived/destroyed sandboxes',
+      }
       checkAborted(opts.signal)
-      await provider.terminateRunner(src.id)
-      ec2InstancesTerminated.push(src.id)
-      yield { type: 'log', line: `→ host terminated for runner ${src.id}` }
+      const deadline8 = Date.now() + maxWaitDrainSec * 1000
+      let drainable = false
+      while (Date.now() < deadline8) {
+        const fresh = await getRunner(api, src.id, opts.signal)
+        if (fresh.currentStartedSandboxes === 0) {
+          drainable = true
+          break
+        }
+        await new Promise((r) => setTimeout(r, 5000))
+      }
+      if (!drainable) {
+        yield { type: 'warning', line: 'drain wait timed out; will try DELETE anyway.' }
+      }
+
+      // ─── [9/10] DELETE runner row ────────────────────────────────────────
+      yield { type: 'stage', stage: 9, total: 10, label: `DELETE /api/admin/runners/${src.id}` }
+      checkAborted(opts.signal)
+      try {
+        await apiFetch<unknown>(api, 'DELETE', `/api/admin/runners/${src.id}`, undefined, {}, opts.signal)
+        runnerRowDeleted = true
+        yield { type: 'log', line: '✓ runner row deleted' }
+      } catch (e: unknown) {
+        const msg = (e as Error)?.message ?? String(e)
+        yield { type: 'log', line: `✗ DELETE failed: ${msg}` }
+        throw new Error(`DELETE runner: ${msg}`)
+      }
+
+      // ─── [10/10] Terminate runner host (via IInfraProvider) ──────────────
+      const skip = opts.skipTerminate ?? opts.skipEc2Terminate ?? false
+      if (skip) {
+        yield { type: 'stage', stage: 10, total: 10, label: 'skipTerminate: leaving runner host running' }
+      } else {
+        yield { type: 'stage', stage: 10, total: 10, label: `Terminate runner host for ${src.id}` }
+        checkAborted(opts.signal)
+        await provider.terminateRunner(src.id)
+        ec2InstancesTerminated.push(src.id)
+        yield { type: 'log', line: `→ host terminated for runner ${src.id}` }
+      }
     }
 
-    // Determine which sandboxes migrated vs archived
+    // Determine which sandboxes migrated vs (intentionally) archived. Restart
+    // failures are reported separately and excluded from sandboxesArchived.
     const sandboxesMigrated = migrations.filter((m) => m.toRunnerId).map((m) => m.id)
-    const sandboxesArchived = migrations.filter((m) => !m.toRunnerId).map((m) => m.id)
+    const sandboxesArchived = migrations
+      .filter((m) => !m.toRunnerId && m.finalState !== 'failed-to-restart')
+      .map((m) => m.id)
 
     return {
       runnerId: opts.runnerId,
       sandboxesMigrated,
       sandboxesArchived,
+      migrationFailures,
       ec2InstancesTerminated,
+      runnerRowDeleted,
       durationMs: Date.now() - start,
     }
   } catch (e: unknown) {

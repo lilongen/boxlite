@@ -25,12 +25,20 @@ import { RunnerOpsJobStore } from './runner-ops-job-store'
 
 const ADD_LOCK_TTL = 1_800
 const SCALE_LOCK_TTL = 3_600
+// Background heartbeat cadence: renews the platform lock and observes a cancel
+// request independently of the generator's yield cadence, so a long internal
+// stage (readiness poll, drain/backup/archive waits) can't outlive the lock or
+// ignore a cancel. Must be well under the lock TTLs above.
+const HEARTBEAT_INTERVAL_MS = 10_000
 
-// Result keys whose values are live credentials. The job record is persisted to
-// Redis for 24h and returned verbatim by GET /jobs/:id, so the full value must
-// never land there. The lib already emits a masked breadcrumb in the log lines
-// (e.g. "apiKey ab12…ef90"), which is all an operator needs from the API path.
-const SENSITIVE_RESULT_KEYS = new Set(['apiKey'])
+// Any result/data key whose name looks like a live credential is masked before
+// it is persisted to the 24h Redis job record / returned by GET /jobs/:id —
+// matched at ANY depth (e.g. peers[].apiKey, sourceApiKey). The lib already
+// emits a masked breadcrumb in the log lines, which is all the API path needs.
+function isSensitiveKey(key: string): boolean {
+  const k = key.toLowerCase()
+  return k.includes('apikey') || k.includes('token') || k.includes('secret') || k.includes('password')
+}
 
 function maskSecret(value: unknown): unknown {
   if (typeof value !== 'string') return value
@@ -38,13 +46,19 @@ function maskSecret(value: unknown): unknown {
   return `${value.slice(0, 4)}…${value.slice(-4)}`
 }
 
-/** Mask sensitive fields of a (possibly nested-free) result object before it is
- *  persisted to the shared job store. Non-objects pass through unchanged. */
-function redactResult(result: unknown): unknown {
-  if (!result || typeof result !== 'object') return result
-  const out: Record<string, unknown> = { ...(result as Record<string, unknown>) }
-  for (const k of Object.keys(out)) {
-    if (SENSITIVE_RESULT_KEYS.has(k)) out[k] = maskSecret(out[k])
+/** Deep-redact a value before it is persisted to the shared job store: recurse
+ *  objects/arrays and mask any value sitting under a sensitive key at any depth.
+ *  `keyHint` masks a top-level scalar emitted directly under a sensitive key
+ *  (the `data` event case). Cycle-safe via a seen-set. */
+function deepRedact(value: unknown, keyHint?: string, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (keyHint && isSensitiveKey(keyHint)) return maskSecret(value)
+  if (!value || typeof value !== 'object') return value
+  if (seen.has(value as object)) return value
+  seen.add(value as object)
+  if (Array.isArray(value)) return value.map((v) => deepRedact(v, undefined, seen))
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = isSensitiveKey(k) ? maskSecret(v) : deepRedact(v, undefined, seen)
   }
   return out
 }
@@ -211,13 +225,14 @@ export class RunnerOpsService {
     // checkAborted(opts.signal) at every stage, so aborting here unwinds it.
     const controller = new AbortController()
     opts.signal = controller.signal
+    const stopHeartbeat = this.startHeartbeat('add-shared', id, ADD_LOCK_TTL, controller)
     try {
       const gen = this.runAddSharedRunner(opts)
       while (true) {
         await this.heartbeatAndMaybeCancel('add-shared', id, ADD_LOCK_TTL, controller)
         const next = await gen.next()
         if (next.done) {
-          await this.store.complete(id, redactResult(next.value))
+          await this.store.complete(id, deepRedact(next.value))
           break
         }
         await this.applyEvent(id, next.value as ProgressEvent, (s) => {
@@ -234,6 +249,7 @@ export class RunnerOpsService {
         await this.store.fail(id, msg, currentStage || undefined)
       }
     } finally {
+      stopHeartbeat()
       await this.store.releaseLock('add-shared', id)
     }
   }
@@ -242,13 +258,14 @@ export class RunnerOpsService {
     let currentStage = 0
     const controller = new AbortController()
     opts.signal = controller.signal
+    const stopHeartbeat = this.startHeartbeat('scale-down', id, SCALE_LOCK_TTL, controller)
     try {
       const gen = this.runScaleDownRunner(opts)
       while (true) {
         await this.heartbeatAndMaybeCancel('scale-down', id, SCALE_LOCK_TTL, controller)
         const next = await gen.next()
         if (next.done) {
-          await this.store.complete(id, redactResult(next.value))
+          await this.store.complete(id, deepRedact(next.value))
           break
         }
         await this.applyEvent(id, next.value as ProgressEvent, (s) => {
@@ -265,23 +282,47 @@ export class RunnerOpsService {
         await this.store.fail(id, msg, currentStage || undefined)
       }
     } finally {
+      stopHeartbeat()
       await this.store.releaseLock('scale-down', id)
     }
   }
 
-  /** Per-step housekeeping run before each generator advance: (1) renew the
-   *  platform lock so a long-but-live op never expires it, and (2) abort the
-   *  generator if an operator has requested cancel. Aborting makes the lib's
-   *  next checkAborted(signal) throw, unwinding into the cancel branch. */
+  /** Start a background lock-renew + cancel-observe timer that runs independently
+   *  of the generator's yield cadence — so a long internal stage (readiness poll,
+   *  drain/backup/archive waits) still renews the lock and honors a cancel.
+   *  Returns a stop fn for the pump's finally. */
+  private startHeartbeat(
+    kind: 'add-shared' | 'scale-down',
+    id: string,
+    ttlSec: number,
+    controller: AbortController,
+  ): () => void {
+    const timer = setInterval(() => {
+      // best-effort: heartbeatAndMaybeCancel swallows its own errors.
+      void this.heartbeatAndMaybeCancel(kind, id, ttlSec, controller)
+    }, HEARTBEAT_INTERVAL_MS)
+    // Don't keep the event loop alive solely for the heartbeat.
+    if (typeof timer.unref === 'function') timer.unref()
+    return () => clearInterval(timer)
+  }
+
+  /** Renew the platform lock and abort the job if a cancel was requested.
+   *  BEST-EFFORT: a transient store error must never fail or cancel a healthy
+   *  in-flight job, so all errors are logged and swallowed (a sustained outage
+   *  simply lets the lock lapse at its TTL, the intended dead-job behavior). */
   private async heartbeatAndMaybeCancel(
     kind: 'add-shared' | 'scale-down',
     id: string,
     ttlSec: number,
     controller: AbortController,
   ): Promise<void> {
-    await this.store.renewLock(kind, id, ttlSec)
-    if (!controller.signal.aborted && (await this.store.isCancelRequested(id))) {
-      controller.abort()
+    try {
+      await this.store.renewLock(kind, id, ttlSec)
+      if (!controller.signal.aborted && (await this.store.isCancelRequested(id))) {
+        controller.abort()
+      }
+    } catch (e) {
+      this.logger.warn(`runner-ops heartbeat ${kind} ${id}: ${(e as Error)?.message ?? String(e)}`)
     }
   }
 
@@ -294,8 +335,7 @@ export class RunnerOpsService {
     } else if (ev.type === 'warning') {
       await this.store.appendLine(jobId, `WARN: ${ev.line}`)
     } else if (ev.type === 'data') {
-      const value = SENSITIVE_RESULT_KEYS.has(ev.key) ? maskSecret(ev.value) : ev.value
-      await this.store.setResultField(jobId, ev.key, value)
+      await this.store.setResultField(jobId, ev.key, deepRedact(ev.value, ev.key))
     }
   }
 }
